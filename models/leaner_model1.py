@@ -2,6 +2,10 @@
 # train_model(model, noisy_imgs1.float(), noisy_imgs2.float(), nn.MSELoss(), torch.optim.Adam(model.parameters()), 500, 10)
 # SGD diverges apparently and gives NaN as loss 
 # decresing mini_batch size to 100 improves a lot (leaner_model1_2) --> PSNR: 25.28 after 7 epochs
+# decresing mini_batch size to 50 improves  --> PSNR: 25.41 after 10 epochs with betas = (0.9, 0.999) (leaner_model1_3) and PSNR: 25.48 after 10 with betas = (0.9, 0.99) (model not saved)
+# increasing learning rate to 0.01 makes it diverge after a few epochs --> error -> inf
+# decreasing mini_batch size to 25 improves to PSNR of 25.50 and terminates in 7 minutes on colab leaving betas (0.9, 0.99) (leaner_model1_4)
+
 class LeanerModel(torch.nn.Module):
     def __init__(self, transposed_conv=False):
         super().__init__()
