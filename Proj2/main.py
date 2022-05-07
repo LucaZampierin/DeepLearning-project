@@ -114,7 +114,10 @@ class SGD:
 
 class Conv2d(Module):
     def __init__(self, in_channels, out_channels, kernel_size=(3, 3), stride=1, padding=0, xavier=True):
-        assert stride > 0 and kernel_size[0] > 0 and kernel_size[1] > 0
+        assert stride > 0 and 0 < kernel_size[0] == kernel_size[1]
+        if padding == "same":
+            assert stride == 1
+            padding = (kernel_size[0] - 1) // 2
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -126,20 +129,21 @@ class Conv2d(Module):
         std_weights = 1
         std_bias = 1
         self.weights = torch.empty((out_channels, in_channels, *kernel_size)).normal_(0, std_weights)
-        self.weights_derivatives = torch.empty(self.weights.size(0), self.weights.size(1)).fill_(0)
+        self.weights_derivatives = torch.empty(self.weights.size()).fill_(0)
         self.biases = torch.empty(out_channels).normal_(0, std_bias)
         self.biases_derivatives = torch.empty(self.biases.size()).fill_(0)
 
-        self.params = [(self.weights, self.weights_derivatives), (self.biases, self.biases_derivatives)]
+        self.params = [[self.weights, self.weights_derivatives], [self.biases, self.biases_derivatives]]
 
     '''
         Expects the input of Nx1xHxW
     '''
-    def cross_correlation(self, input: torch.Tensor, kernel: torch.Tensor):
-        unfolded = torch.nn.functional.unfold(input, kernel_size=self.kernel_size, stride=self.stride, padding=self.padding)
+    def cross_correlation(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0):
+        kernel_size = (kernel.size(1), kernel.size(2))
+        unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding)
         wxb = kernel.view(1, -1) @ unfolded
         # samples x 1-channel x image size
-        return wxb.view(input.size(0), 1, (input.shape[2] - self.kernel_size[0] + 2*self.padding) // self.stride + 1, (input.shape[3] - self.kernel_size[1] + 2*self.padding) // self.stride + 1)
+        return wxb.view(input.size(0), 1, (input.shape[2] - kernel_size[0] + 2*padding) // stride + 1, (input.shape[3] - kernel_size[1] + 2*padding) // stride + 1)
 
     def forward(self, input: torch.Tensor):
         assert input.size(1) == self.in_channels
@@ -149,7 +153,7 @@ class Conv2d(Module):
 
         for i in range(self.out_channels):
             for j in range(self.in_channels):
-                res = self.cross_correlation(input[:,j].view(input.size(0), 1, input.size(2), -1), self.weights[i, j])
+                res = self.cross_correlation(input[:,j].view(input.size(0), 1, input.size(2), -1), self.weights[i, j].view(1, self.weights.size(2), -1), stride=self.stride, padding=self.padding)
                 slice = self.output[:,i].view(self.output.size(0), 1, self.output.size(2), self.output.size(3))
                 slice += res
             self.output[:,i] += self.biases[i]
@@ -165,8 +169,8 @@ class Conv2d(Module):
 
         for i in range(self.out_channels):
             for j in range(self.in_channels):
-                self.weights_derivatives[i, j] = self.cross_correlation(self.input[:, j].view(self.input.size(0), 1, self.input.size(2), -1), grad_wrt_output[:, i].view(self.input.size(0), 1, grad_wrt_output.size(2), -1))
-                dl_dx += self.cross_correlation(grad_wrt_output[i].view(self.input.size(0), 1,self.input.size(2), -1), rot180(self.weights[i, j]))
+                self.weights_derivatives[i, j] = self.cross_correlation(self.input[:, j].view(self.input.size(0), 1, self.input.size(2), -1), grad_wrt_output[:, i].view(self.input.size(0), grad_wrt_output.size(2), -1))
+                dl_dx += self.cross_correlation(grad_wrt_output[:, i].view(self.input.size(0), 1,self.input.size(2), -1), rot180(self.weights[i, j]).view(1, self.weights.size(2), -1), padding=(self.weights.size(2) - 1) // 2)
         return dl_dx
 
     def param(self):
@@ -180,23 +184,47 @@ def rot180(input: torch.Tensor):
 
 def train_model(model, train_input, train_target, criterion, optimizer, mini_batch_size=1, epochs=1):
     for e in range(epochs):
-      avg_loss = 0
-      for b in range(0, train_input.size(0), mini_batch_size):
-          output = model.forward(train_input.narrow(0, b, mini_batch_size))
-          loss = criterion.forward(output, train_target.narrow(0, b, mini_batch_size))
-          avg_loss += loss.item()
-          model.zero_grad()
-          model.backward(criterion.backward())
-          optimizer.step()
+        avg_loss = 0
+        for b in range(0, train_input.size(0), mini_batch_size):
+            output = model.forward(train_input.narrow(0, b, mini_batch_size))
+            loss = criterion.forward(output, train_target.narrow(0, b, mini_batch_size))
+            avg_loss += loss.item()
+            model.zero_grad()
+            model.backward(criterion.backward())
+            optimizer.step()
+            print(avg_loss)
 
 
-model = Sequential(Conv2d(1, 1, padding=1), ReLU())
+def train_model_torch(model, train_input, train_target, criterion, optimizer, mini_batch_size=1, epochs=500):
+    for e in range(epochs):
+        avg_loss = 0
+        for b in range(0, train_input.size(0), mini_batch_size):
+            output = model(train_input.narrow(0, b, mini_batch_size))
+            loss = criterion(output, train_target.narrow(0, b, mini_batch_size))
+            avg_loss += loss
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            print(avg_loss)
+
+
+model = Sequential(Conv2d(1, 5, padding="same"), ReLU())
 loss = MSE()
-optimizer = SGD(model.param())
+optimizer = SGD(model.param(), lr=0.00001)
 
-train_input = torch.empty((1, 1, 4, 4)).normal_()
-train_target = torch.empty((1, 1, 4, 4)).fill_(2)
+model2 = torch.nn.Sequential(torch.nn.Conv2d(1, 5, kernel_size=(3, 3), padding="same"), torch.nn.ReLU())
+criterion = torch.nn.MSELoss()
+optimizer2 = torch.optim.SGD(model2.parameters(), lr=0.00001)
+
+train_input = torch.empty((2, 1, 4, 4)).normal_()
+train_target = torch.empty((2, 1, 4, 4)).fill_(2)
+model.modules[0].weights = model2._modules['0'].weight
+model.modules[0].biases = model2._modules['0'].bias
 train_model(model, train_input, train_target, loss, optimizer, epochs=10)
+train_model_torch(model2, train_input, train_target, criterion, optimizer2, epochs=10)
+
+print(model.forward(train_input))
+print(model2(train_input))
 
 '''
 x = torch.empty((2, 2, 4, 4)).fill_(2)
