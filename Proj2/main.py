@@ -110,7 +110,29 @@ class SGD:
         '''Network Parameters can be a list of tuples (param tensor, grad tensor)'''
         for p in self.network_parameters:
             p[0] -= self.lr * p[1]
+# Nearest Neighbour upsampling
+class Upsampling(Module):
+    def __init__(self, scale_factor = 2):
+        super().__init__()
+        self.scale_factor = scale_factor
+        
+    def zero_grad(self):
+        pass
 
+    def forward(self, input: torch.Tensor):
+        self.input = input
+        # supports input of arbitrary dimension
+        output_size = [self.input.size(0), self.input.size(1)] + [int(float(input.size(i + 2)) * self.scale_factor) for i in range(self.input.dim() - 2)]
+        print(output_size)
+        self.output = torch.empty(output_size)
+
+        
+        for y in range(self.output.size(dim = 3)):
+            for x in range(self.output.size(dim = 2)):
+                self.output[:,:,x,y] = self.input[:,:,int(x/self.scale_factor), int(y/self.scale_factor)]
+        return self.output
+    def backward(self, grad_wrt_output: torch.Tensor):
+        return grad_wrt_output
 
 class Conv2d(Module):
     def __init__(self, in_channels, out_channels, kernel_size=(3, 3), stride=1, padding=0, xavier=True):
