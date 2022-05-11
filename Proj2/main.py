@@ -2,7 +2,8 @@ import torch
 from torch import empty, cat, arange
 from torch.nn.functional import fold, unfold
 
-#torch.set_grad_enabled(False)
+
+# torch.set_grad_enabled(False)
 
 
 class Module(object):
@@ -95,12 +96,12 @@ class MSE(Module):
     def forward(self, *input: torch.Tensor):
         assert len(input) == 2
         input, target = input[0], input[1]
-        self.input = (target - input) #NxCxHxW
+        self.input = (target - input)  # NxCxHxW
         return (self.input ** 2).mean()
 
     def backward(self, *grad_wrt_output: torch.Tensor):
         # added terms to make it equal to pytorch
-        return -(2/(self.input.size(0) * self.input.size(1) * self.input.size(2)*self.input.size(3))) * self.input
+        return -(2 / (self.input.size(0) * self.input.size(1) * self.input.size(2) * self.input.size(3))) * self.input
 
 
 class SGD:
@@ -112,29 +113,38 @@ class SGD:
         '''Network Parameters can be a list of tuples (param tensor, grad tensor)'''
         for p in self.network_parameters:
             p[0] -= self.lr * p[1]
+
+
 # Nearest Neighbour upsampling
 class Upsampling(Module):
-    def __init__(self, scale_factor = 2):
+    def __init__(self, scale_factor=2):
         super().__init__()
         self.scale_factor = scale_factor
-        
+
     def zero_grad(self):
         pass
 
     def forward(self, input: torch.Tensor):
         self.input = input
         # supports input of arbitrary dimension
-        output_size = [self.input.size(0), self.input.size(1)] + [int(float(input.size(i + 2)) * self.scale_factor) for i in range(self.input.dim() - 2)]
+        output_size = [self.input.size(0), self.input.size(1)] + [int(float(input.size(i + 2)) * self.scale_factor) for
+                                                                  i in range(self.input.dim() - 2)]
         print(output_size)
         self.output = torch.empty(output_size)
 
-        
-        for y in range(self.output.size(dim = 3)):
-            for x in range(self.output.size(dim = 2)):
-                self.output[:,:,x,y] = self.input[:,:,int(x/self.scale_factor), int(y/self.scale_factor)]
+        for y in range(self.output.size(dim=3)):
+            for x in range(self.output.size(dim=2)):
+                self.output[:, :, x, y] = self.input[:, :, int(x / self.scale_factor), int(y / self.scale_factor)]
         return self.output
+
+    # Sum of patches of gradients
     def backward(self, grad_wrt_output: torch.Tensor):
-        return grad_wrt_output
+        res = torch.empty((grad_wrt_output.size(0), grad_wrt_output.size(1), grad_wrt_output.size(2) // self.scale_factor, grad_wrt_output.size(3) // self.scale_factor)).fill_(0)
+        for c in range(grad_wrt_output.size(1)):
+            unfolded = torch.nn.functional.unfold(grad_wrt_output[:,c,:,:].view(grad_wrt_output.size(0), 1, grad_wrt_output.size(2), grad_wrt_output.size(3)), kernel_size=self.scale_factor, stride=self.scale_factor)
+            res[:, c, :, :] += unfolded.sum(dim=1).view(grad_wrt_output.size(0), 1, grad_wrt_output.size(2) // self.scale_factor, grad_wrt_output.size(3) // self.scale_factor).squeeze()
+        return res
+
 
 class Conv2d(Module):
     def __init__(self, in_channels, out_channels, kernel_size=(3, 3), stride=1, padding=0):
@@ -150,7 +160,7 @@ class Conv2d(Module):
         self.padding = padding
 
         # Glorot Initialization
-        std_weights = 6.0/(in_channels + out_channels)
+        std_weights = 6.0 / (in_channels + out_channels)
         std_bias = 1
         self.weights = torch.empty((out_channels, in_channels, *kernel_size)).uniform_(-std_weights, std_weights)
         self.weights_derivatives = torch.empty(self.weights.size()).fill_(0)
@@ -162,25 +172,30 @@ class Conv2d(Module):
     '''
         Expects the input of Nx1xHxW
     '''
+
     def cross_correlation(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0):
         kernel_size = (kernel.size(1), kernel.size(2))
         unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding)
         wxb = kernel.view(kernel.size(0), -1) @ unfolded
         # samples x 1-channel x image size
-        return wxb.view(input.size(0), 1, (input.shape[2] - kernel_size[0] + 2*padding) // stride + 1, (input.shape[3] - kernel_size[1] + 2*padding) // stride + 1)
+        return wxb.view(input.size(0), 1, (input.shape[2] - kernel_size[0] + 2 * padding) // stride + 1,
+                        (input.shape[3] - kernel_size[1] + 2 * padding) // stride + 1)
 
     def forward(self, input: torch.Tensor):
         assert input.size(1) == self.in_channels
-        output_size = ((input.shape[2] - self.kernel_size[0] + 2*self.padding) // self.stride + 1, (input.shape[3] - self.kernel_size[1] + 2*self.padding) // self.stride + 1)
+        output_size = ((input.shape[2] - self.kernel_size[0] + 2 * self.padding) // self.stride + 1,
+                       (input.shape[3] - self.kernel_size[1] + 2 * self.padding) // self.stride + 1)
         self.output = torch.empty((input.size(0), self.out_channels, *output_size)).fill_(0)
         self.input = input
 
         for i in range(self.out_channels):
             for j in range(self.in_channels):
-                res = self.cross_correlation(input[:,j].view(input.size(0), 1, input.size(2), -1), self.weights[i, j].view(1, self.weights.size(2), -1), stride=self.stride, padding=self.padding)
-                slice = self.output[:,i].view(self.output.size(0), 1, self.output.size(2), self.output.size(3))
+                res = self.cross_correlation(input[:, j].view(input.size(0), 1, input.size(2), -1),
+                                             self.weights[i, j].view(1, self.weights.size(2), -1), stride=self.stride,
+                                             padding=self.padding)
+                slice = self.output[:, i].view(self.output.size(0), 1, self.output.size(2), self.output.size(3))
                 slice += res
-            self.output[:,i] += self.biases[i]
+            self.output[:, i] += self.biases[i]
         return self.output
 
     def zero_grad(self):
@@ -194,13 +209,16 @@ class Conv2d(Module):
         for i in range(self.out_channels):
             for j in range(self.in_channels):
                 for sample in range(self.input.size(0)):
-                    res = self.cross_correlation(self.input[sample, j].view(1, 1, self.input.size(2), -1), grad_wrt_output[sample, i].view(1, grad_wrt_output.size(2), -1))
+                    res = self.cross_correlation(self.input[sample, j].view(1, 1, self.input.size(2), -1),
+                                                 grad_wrt_output[sample, i].view(1, grad_wrt_output.size(2), -1))
                     if res.view(-1).size(0) != 1:
                         res = res.view(self.weights.size(2), -1)
                     else:
                         res = res.view(1, 1)
                     self.weights_derivatives[i, j] += res
-                    dl_dx += self.cross_correlation(grad_wrt_output[sample, i].view(1, 1,self.input.size(2), -1), rot180(self.weights[i, j]).view(1, self.weights.size(2), -1), padding=(self.weights.size(2) - 1) // 2)
+                    dl_dx += self.cross_correlation(grad_wrt_output[sample, i].view(1, 1, self.input.size(2), -1),
+                                                    rot180(self.weights[i, j]).view(1, self.weights.size(2), -1),
+                                                    padding=(self.weights.size(2) - 1) // 2)
         return dl_dx
 
     def param(self):
@@ -222,7 +240,9 @@ def train_model(model, train_input, train_target, criterion, optimizer, mini_bat
             print(f"My Loss: {loss}")
             avg_loss += loss.item()
             model.zero_grad()
-            model.backward(criterion.backward())
+            loss_der = criterion.backward()
+            #print(f"Loss_der: {loss_der}")
+            model.backward(loss_der)
             optimizer.step()
             print(avg_loss)
 
@@ -237,22 +257,62 @@ def train_model_torch(model, train_input, train_target, criterion, optimizer, mi
             print(f"Torch Loss: {loss}")
             avg_loss += loss
             optimizer.zero_grad()
+            der = torch.autograd.grad(loss, output)
+            #print(f"Der_loss_torch: {der}")
             loss.backward()
             optimizer.step()
             print(avg_loss)
 
 
-# TODO: debug why it does not work if stacking multiple layers
-model = Sequential(Conv2d(1, 1, padding="same"), Sigmoid(), Conv2d(1, 1, padding="same"), Sigmoid())
+
+
+'''
+input = torch.arange(1, 65, dtype=torch.float32).view(2, 2, 4, 4).requires_grad_()
+target = torch.empty((2, 2, 8, 8)).fill_(2)
+
+up = torch.nn.UpsamplingNearest2d(scale_factor=2)
+criterion = torch.nn.MSELoss()
+output = up(input)
+print(f"Torch_out: {output}")
+
+up2 = Upsampling()
+criterion2 = MSE()
+output2 = up2.forward(input)
+print(f"Our_out: {output2}")
+
+loss = criterion(output, target)
+print(f"Torch_loss: {loss}")
+loss2 = criterion2.forward(output2, target)
+print(f"Our_loss: {loss2}")
+
+print(torch.autograd.grad(loss, input))
+print(up2.backward(criterion2.backward()))
+'''
+
+#
+
+model = Sequential(Conv2d(1, 1, stride=2, padding=1),
+                   ReLU(),
+                   Conv2d(1, 1, stride=2, padding=1),
+                   ReLU(),
+                   Upsampling(),
+                   ReLU(),
+                   Upsampling(),
+                   Sigmoid())
+
 loss = MSE()
 optimizer = SGD(model.param(), lr=0.001)
 
-model2 = torch.nn.Sequential(torch.nn.Conv2d(1, 1, kernel_size=(3, 3), padding="same"), torch.nn.Sigmoid(), torch.nn.Conv2d(1, 1, kernel_size=(3, 3), padding="same"), torch.nn.Sigmoid())
+model2 = torch.nn.Sequential(torch.nn.Conv2d(1, 1, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
+                             torch.nn.Conv2d(1, 1, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
+                             torch.nn.UpsamplingNearest2d(scale_factor=2), torch.nn.ReLU(),
+                            torch.nn.UpsamplingNearest2d(scale_factor=2), torch.nn.Sigmoid())
+
 criterion = torch.nn.MSELoss()
 optimizer2 = torch.optim.SGD(model2.parameters(), lr=0.001)
 
-train_input = torch.empty((4, 1, 4, 4)).fill_(1).requires_grad_()
-train_target = torch.empty((4, 1, 4, 4)).fill_(2)
+train_input = torch.empty((4, 1, 32, 32)).fill_(1).requires_grad_()
+train_target = torch.empty((4, 1, 32, 32)).fill_(2)
 model.modules[0].weights[:] = model2._modules['0'].weight.clone()
 model.modules[0].biases[:] = model2._modules['0'].bias.clone()
 model.modules[2].weights[:] = model2._modules['2'].weight.clone()
@@ -260,8 +320,8 @@ model.modules[2].biases[:] = model2._modules['2'].bias.clone()
 train_model(model, train_input, train_target, loss, optimizer, epochs=1, mini_batch_size=2)
 train_model_torch(model2, train_input, train_target, criterion, optimizer2, epochs=1, mini_batch_size=2)
 
-#print(model.forward(train_input.clone()))
-#print(model2(train_input.clone()))
+# print(model.forward(train_input.clone()))
+# print(model2(train_input.clone()))
 '''
 
 criterion = torch.nn.MSELoss()
@@ -301,8 +361,6 @@ print(x)
 print(cross_correlation(x, kernel, 2, 1, 1))
 '''
 
-
-
 '''
 input = torch.empty((3, 5)).normal_().requires_grad_()
 relu = torch.nn.ReLU()
@@ -317,6 +375,3 @@ print(act_relu.grad)
 
 #target = torch.empty((3, 5)).normal_().requires_grad_()
 '''
-
-
-
