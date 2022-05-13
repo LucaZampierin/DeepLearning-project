@@ -173,13 +173,13 @@ class Conv2d(Module):
         Expects the input of Nx1xHxW
     '''
 
-    def cross_correlation(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0):
+    def cross_correlation(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
         kernel_size = (kernel.size(1), kernel.size(2))
-        unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding)
+        unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation)
         wxb = kernel.view(kernel.size(0), -1) @ unfolded
         # samples x 1-channel x image size
-        return wxb.view(input.size(0), 1, (input.shape[2] - kernel_size[0] + 2 * padding) // stride + 1,
-                        (input.shape[3] - kernel_size[1] + 2 * padding) // stride + 1)
+        return wxb.view(input.size(0), 1, (input.shape[2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
+                        (input.shape[3] - dilation * (kernel_size[1] - 1) - 1 + 2 * padding) // stride + 1)
 
     def forward(self, input: torch.Tensor):
         assert input.size(1) == self.in_channels
@@ -209,16 +209,19 @@ class Conv2d(Module):
         for i in range(self.out_channels):
             for j in range(self.in_channels):
                 for sample in range(self.input.size(0)):
+                    # Only works for strides even
+                    dilated_grad = dilate(grad_wrt_output[sample, i], self.stride)
                     res = self.cross_correlation(self.input[sample, j].view(1, 1, self.input.size(2), -1),
-                                                 grad_wrt_output[sample, i].view(1, grad_wrt_output.size(2), -1))
+                                                dilated_grad.view(1, dilated_grad.size(0), -1))
                     if res.view(-1).size(0) != 1:
                         res = res.view(self.weights.size(2), -1)
                     else:
                         res = res.view(1, 1)
-                    self.weights_derivatives[i, j] += res
-                    dl_dx += self.cross_correlation(grad_wrt_output[sample, i].view(1, 1, self.input.size(2), -1),
+                    #self.weights_derivatives[i, j] += res
+                    dilated_grad = dilate(grad_wrt_output[sample, i], self.stride, self.weights.size(2) - 1)
+                    dl_dx += self.cross_correlation(dilated_grad.view(1, 1, dilated_grad.size(0), -1),
                                                     rot180(self.weights[i, j]).view(1, self.weights.size(2), -1),
-                                                    padding=(self.weights.size(2) - 1) // 2)
+                                                    padding=(self.weights.size(2) - 1)//2)
         return dl_dx
 
     def param(self):
@@ -228,6 +231,17 @@ class Conv2d(Module):
 def rot180(input: torch.Tensor):
     assert len(input.shape) == 2
     return input.rot90(2, [0, 1])
+
+
+def dilate(input: torch.Tensor, factor, padding=0):
+    assert len(input.shape) == 2
+    assert factor > 1 and factor % 2 == 0
+    output_size = (input.size(0) + (input.size(0) - 1)*(factor - 1) + 2*padding, input.size(1) + (input.size(1) - 1)*(factor - 1) + 2*padding)
+    res = torch.empty(output_size).fill_(0)
+    for i, h in enumerate(range(padding, output_size[0] - padding, factor)):
+        for j, w in enumerate(range(padding, output_size[1] - padding, factor)):
+            res[h, w] = input[i, j]
+    return res
 
 
 def train_model(model, train_input, train_target, criterion, optimizer, mini_batch_size=1, epochs=1):
