@@ -1,6 +1,7 @@
 import torch
 from torch import empty, cat, arange
 from torch.nn.functional import fold, unfold
+#from line_profiler_pycharm import profile
 
 
 # torch.set_grad_enabled(False)
@@ -129,7 +130,6 @@ class Upsampling(Module):
         # supports input of arbitrary dimension
         output_size = [self.input.size(0), self.input.size(1)] + [int(float(input.size(i + 2)) * self.scale_factor) for
                                                                   i in range(self.input.dim() - 2)]
-        print(output_size)
         self.output = torch.empty(output_size)
 
         for y in range(self.output.size(dim=3)):
@@ -173,12 +173,13 @@ class Conv2d(Module):
         Expects the input of Nx1xHxW
     '''
 
+    #@profile
     def cross_correlation(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
         kernel_size = (kernel.size(1), kernel.size(2))
         unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation)
         wxb = kernel.view(kernel.size(0), -1) @ unfolded
         # samples x 1-channel x image size
-        return wxb.view(input.size(0), 1, (input.shape[2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
+        return wxb.view(input.size(0), input.size(1), (input.shape[2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
                         (input.shape[3] - dilation * (kernel_size[1] - 1) - 1 + 2 * padding) // stride + 1)
 
     def forward(self, input: torch.Tensor):
@@ -192,9 +193,10 @@ class Conv2d(Module):
             for j in range(self.in_channels):
                 res = self.cross_correlation(input[:, j].view(input.size(0), 1, input.size(2), -1),
                                              self.weights[i, j].view(1, self.weights.size(2), -1), stride=self.stride,
-                                             padding=self.padding)
-                slice = self.output[:, i].view(self.output.size(0), 1, self.output.size(2), self.output.size(3))
-                slice += res
+                                             padding=self.padding).view(self.output.size(0), self.output.size(2), self.output.size(3))
+                #slice = self.output[:, i].view(self.output.size(0), 1, self.output.size(2), self.output.size(3))
+                #slice += res
+                self.output[:, i] += res
             self.output[:, i] += self.biases[i]
         return self.output
 
@@ -202,15 +204,17 @@ class Conv2d(Module):
         self.weights_derivatives.fill_(0)
         self.biases_derivatives.fill_(0)
 
+    #@profile
     def backward(self, grad_wrt_output: torch.Tensor):
         self.biases_derivatives[:] += grad_wrt_output.view(self.out_channels, -1).sum(1)
         dl_dx = torch.empty((self.input.size())).fill_(0)
 
+        # Too slow doing it with iterations
         for i in range(self.out_channels):
             for j in range(self.in_channels):
                 for sample in range(self.input.size(0)):
                     # Only works for strides even and inserts self.stride - 1 zeros
-                    dilated_grad = dilate(grad_wrt_output[sample, i], self.stride)
+                    dilated_grad = dilate_efficient_stride2(grad_wrt_output[sample, i])
                     res = self.cross_correlation(self.input[sample, j].view(1, 1, self.input.size(2), -1),
                                                 dilated_grad.view(1, dilated_grad.size(0), -1), padding=self.padding)
                     if res.view(-1).size(0) != 1:
@@ -233,6 +237,7 @@ def rot180(input: torch.Tensor):
     return input.rot90(2, [0, 1])
 
 
+'''
 def dilate(input: torch.Tensor, factor):
     assert len(input.shape) == 2
     assert factor > 1 and factor % 2 == 0
@@ -242,10 +247,20 @@ def dilate(input: torch.Tensor, factor):
         for j, w in enumerate(range(0, output_size[1] - factor//2, factor)):
             res[h, w] = input[i, j]
     return res
+'''
 
+def dilate_efficient_stride2(input: torch.Tensor):
+    assert len(input.shape) == 2
+    #dilated_size = (2* input.size(0) - 1, 2*input.size(1) - 1)
+    # Adds extra final column and row
+    dilated_size = (2* input.size(0), 2*input.size(1))
+    dilator = torch.empty(dilated_size).fill_(0).fill_diagonal_(1)[::2]
+    res = (input.t() @ dilator).t() @ dilator
+    return res
 
 def train_model(model, train_input, train_target, criterion, optimizer, mini_batch_size=1, epochs=1):
     for e in range(epochs):
+        print(f"Epoch: {e}")
         avg_loss = 0
         for b in range(0, train_input.size(0), mini_batch_size):
             output = model.forward(train_input.narrow(0, b, mini_batch_size))
@@ -256,11 +271,12 @@ def train_model(model, train_input, train_target, criterion, optimizer, mini_bat
             model.zero_grad()
             model.backward(criterion.backward())
             optimizer.step()
-            print(avg_loss)
+        print(avg_loss)
 
 
 def train_model_torch(model, train_input, train_target, criterion, optimizer, mini_batch_size=1, epochs=500):
     for e in range(epochs):
+        print(f"Epoch: {e}")
         avg_loss = 0
         for b in range(0, train_input.size(0), mini_batch_size):
             output = model(train_input.narrow(0, b, mini_batch_size))
@@ -271,9 +287,11 @@ def train_model_torch(model, train_input, train_target, criterion, optimizer, mi
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            print(avg_loss)
+        print(avg_loss)
 
 
+#test = torch.ones((3, 3))
+#print(dilate_efficient_stride2(test))
 
 
 '''
@@ -301,9 +319,9 @@ print(up2.backward(criterion2.backward()))
 
 #
 
-model = Sequential(Conv2d(1, 1, stride=2, padding=1),
+model = Sequential(Conv2d(3, 32, stride=2, padding=1),
                    ReLU(),
-                   Conv2d(1, 1, stride=2, padding=1),
+                   Conv2d(32, 3, stride=2, padding=1),
                    ReLU(),
                    Upsampling(),
                    ReLU(),
@@ -313,14 +331,26 @@ model = Sequential(Conv2d(1, 1, stride=2, padding=1),
 loss = MSE()
 optimizer = SGD(model.param(), lr=0.001)
 
-model2 = torch.nn.Sequential(torch.nn.Conv2d(1, 1, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
-                             torch.nn.Conv2d(1, 1, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
+model2 = torch.nn.Sequential(torch.nn.Conv2d(3, 32, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
+                             torch.nn.Conv2d(32, 3, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
                              torch.nn.UpsamplingNearest2d(scale_factor=2), torch.nn.ReLU(),
                             torch.nn.UpsamplingNearest2d(scale_factor=2), torch.nn.Sigmoid())
 
 criterion = torch.nn.MSELoss()
 optimizer2 = torch.optim.SGD(model2.parameters(), lr=0.001)
 
+noisy_imgs1, noisy_imgs2 = torch.load('../train_data.pkl') # 50000 x 3 x 32 x 32
+noisy_imgs1 = noisy_imgs1[:500].float()
+noisy_imgs2 = noisy_imgs2[:500].float()
+
+model.modules[0].weights[:] = model2._modules['0'].weight.clone()
+model.modules[0].biases[:] = model2._modules['0'].bias.clone()
+model.modules[2].weights[:] = model2._modules['2'].weight.clone()
+model.modules[2].biases[:] = model2._modules['2'].bias.clone()
+train_model_torch(model2, noisy_imgs1, noisy_imgs2, criterion, optimizer2, epochs=3, mini_batch_size=250)
+train_model(model, noisy_imgs1, noisy_imgs2, loss, optimizer, epochs=3, mini_batch_size=250)
+
+'''
 train_input = torch.empty((4, 1, 8, 8)).fill_(1).requires_grad_()
 train_target = torch.empty((4, 1, 8, 8)).fill_(2)
 model.modules[0].weights[:] = model2._modules['0'].weight.clone()
@@ -330,6 +360,7 @@ model.modules[2].biases[:] = model2._modules['2'].bias.clone()
 train_model(model, train_input, train_target, loss, optimizer, epochs=10, mini_batch_size=2)
 train_model_torch(model2, train_input, train_target, criterion, optimizer2, epochs=10, mini_batch_size=2)
 
+'''
 # print(model.forward(train_input.clone()))
 # print(model2(train_input.clone()))
 '''
