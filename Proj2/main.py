@@ -209,19 +209,19 @@ class Conv2d(Module):
         for i in range(self.out_channels):
             for j in range(self.in_channels):
                 for sample in range(self.input.size(0)):
-                    # Only works for strides even
+                    # Only works for strides even and inserts self.stride - 1 zeros
                     dilated_grad = dilate(grad_wrt_output[sample, i], self.stride)
                     res = self.cross_correlation(self.input[sample, j].view(1, 1, self.input.size(2), -1),
-                                                dilated_grad.view(1, dilated_grad.size(0), -1))
+                                                dilated_grad.view(1, dilated_grad.size(0), -1), padding=self.padding)
                     if res.view(-1).size(0) != 1:
                         res = res.view(self.weights.size(2), -1)
                     else:
                         res = res.view(1, 1)
-                    #self.weights_derivatives[i, j] += res
-                    dilated_grad = dilate(grad_wrt_output[sample, i], self.stride, self.weights.size(2) - 1)
-                    dl_dx += self.cross_correlation(dilated_grad.view(1, 1, dilated_grad.size(0), -1),
+                    self.weights_derivatives[i, j] += res
+                    res = self.cross_correlation(dilated_grad.view(1, 1, dilated_grad.size(0), -1),
                                                     rot180(self.weights[i, j]).view(1, self.weights.size(2), -1),
                                                     padding=(self.weights.size(2) - 1)//2)
+                    dl_dx += res
         return dl_dx
 
     def param(self):
@@ -233,13 +233,13 @@ def rot180(input: torch.Tensor):
     return input.rot90(2, [0, 1])
 
 
-def dilate(input: torch.Tensor, factor, padding=0):
+def dilate(input: torch.Tensor, factor):
     assert len(input.shape) == 2
     assert factor > 1 and factor % 2 == 0
-    output_size = (input.size(0) + (input.size(0) - 1)*(factor - 1) + 2*padding, input.size(1) + (input.size(1) - 1)*(factor - 1) + 2*padding)
+    output_size = (input.size(0) + (input.size(0) - 1)*(factor - 1) + factor - 1, input.size(1) + (input.size(1) - 1)*(factor - 1) + factor - 1)
     res = torch.empty(output_size).fill_(0)
-    for i, h in enumerate(range(padding, output_size[0] - padding, factor)):
-        for j, w in enumerate(range(padding, output_size[1] - padding, factor)):
+    for i, h in enumerate(range(0, output_size[0] - factor//2, factor)):
+        for j, w in enumerate(range(0, output_size[1] - factor//2, factor)):
             res[h, w] = input[i, j]
     return res
 
@@ -249,14 +249,12 @@ def train_model(model, train_input, train_target, criterion, optimizer, mini_bat
         avg_loss = 0
         for b in range(0, train_input.size(0), mini_batch_size):
             output = model.forward(train_input.narrow(0, b, mini_batch_size))
-            print(f"My Output: {output}")
+            #print(f"My Output: {output}")
             loss = criterion.forward(output, train_target.narrow(0, b, mini_batch_size))
-            print(f"My Loss: {loss}")
+            #print(f"My Loss: {loss}")
             avg_loss += loss.item()
             model.zero_grad()
-            loss_der = criterion.backward()
-            #print(f"Loss_der: {loss_der}")
-            model.backward(loss_der)
+            model.backward(criterion.backward())
             optimizer.step()
             print(avg_loss)
 
@@ -266,13 +264,11 @@ def train_model_torch(model, train_input, train_target, criterion, optimizer, mi
         avg_loss = 0
         for b in range(0, train_input.size(0), mini_batch_size):
             output = model(train_input.narrow(0, b, mini_batch_size))
-            print(f"Torch Output: {output}")
+            #print(f"Torch Output: {output}")
             loss = criterion(output, train_target.narrow(0, b, mini_batch_size))
-            print(f"Torch Loss: {loss}")
+            #print(f"Torch Loss: {loss}")
             avg_loss += loss
             optimizer.zero_grad()
-            der = torch.autograd.grad(loss, output)
-            #print(f"Der_loss_torch: {der}")
             loss.backward()
             optimizer.step()
             print(avg_loss)
@@ -325,14 +321,14 @@ model2 = torch.nn.Sequential(torch.nn.Conv2d(1, 1, kernel_size=(3, 3), stride=(2
 criterion = torch.nn.MSELoss()
 optimizer2 = torch.optim.SGD(model2.parameters(), lr=0.001)
 
-train_input = torch.empty((4, 1, 32, 32)).fill_(1).requires_grad_()
-train_target = torch.empty((4, 1, 32, 32)).fill_(2)
+train_input = torch.empty((4, 1, 8, 8)).fill_(1).requires_grad_()
+train_target = torch.empty((4, 1, 8, 8)).fill_(2)
 model.modules[0].weights[:] = model2._modules['0'].weight.clone()
 model.modules[0].biases[:] = model2._modules['0'].bias.clone()
 model.modules[2].weights[:] = model2._modules['2'].weight.clone()
 model.modules[2].biases[:] = model2._modules['2'].bias.clone()
-train_model(model, train_input, train_target, loss, optimizer, epochs=1, mini_batch_size=2)
-train_model_torch(model2, train_input, train_target, criterion, optimizer2, epochs=1, mini_batch_size=2)
+train_model(model, train_input, train_target, loss, optimizer, epochs=10, mini_batch_size=2)
+train_model_torch(model2, train_input, train_target, criterion, optimizer2, epochs=10, mini_batch_size=2)
 
 # print(model.forward(train_input.clone()))
 # print(model2(train_input.clone()))
