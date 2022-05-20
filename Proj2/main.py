@@ -1,7 +1,9 @@
 import torch
 from torch import empty, cat, arange
 from torch.nn.functional import fold, unfold
-#from line_profiler_pycharm import profile
+
+
+# from line_profiler_pycharm import profile
 
 
 # torch.set_grad_enabled(False)
@@ -139,10 +141,17 @@ class Upsampling(Module):
 
     # Sum of patches of gradients
     def backward(self, grad_wrt_output: torch.Tensor):
-        res = torch.empty((grad_wrt_output.size(0), grad_wrt_output.size(1), grad_wrt_output.size(2) // self.scale_factor, grad_wrt_output.size(3) // self.scale_factor)).fill_(0)
+        res = torch.empty((grad_wrt_output.size(0), grad_wrt_output.size(1),
+                           grad_wrt_output.size(2) // self.scale_factor,
+                           grad_wrt_output.size(3) // self.scale_factor)).fill_(0)
         for c in range(grad_wrt_output.size(1)):
-            unfolded = torch.nn.functional.unfold(grad_wrt_output[:,c,:,:].view(grad_wrt_output.size(0), 1, grad_wrt_output.size(2), grad_wrt_output.size(3)), kernel_size=self.scale_factor, stride=self.scale_factor)
-            res[:, c, :, :] += unfolded.sum(dim=1).view(grad_wrt_output.size(0), 1, grad_wrt_output.size(2) // self.scale_factor, grad_wrt_output.size(3) // self.scale_factor).squeeze()
+            unfolded = torch.nn.functional.unfold(
+                grad_wrt_output[:, c, :, :].view(grad_wrt_output.size(0), 1, grad_wrt_output.size(2),
+                                                 grad_wrt_output.size(3)), kernel_size=self.scale_factor,
+                stride=self.scale_factor)
+            res[:, c, :, :] += unfolded.sum(dim=1).view(grad_wrt_output.size(0), 1,
+                                                        grad_wrt_output.size(2) // self.scale_factor,
+                                                        grad_wrt_output.size(3) // self.scale_factor).squeeze()
         return res
 
 
@@ -169,17 +178,15 @@ class Conv2d(Module):
 
         self.params = [[self.weights, self.weights_derivatives], [self.biases, self.biases_derivatives]]
 
-    '''
-        Expects the input of Nx1xHxW
-    '''
-
-    #@profile
+    # @profile
     def cross_correlation(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
         kernel_size = (kernel.size(1), kernel.size(2))
-        unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding, dilation=dilation)
-        wxb = kernel.view(kernel.size(0), -1) @ unfolded
+        unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding,
+                                              dilation=dilation)
+        wxb = kernel.view(kernel.size(0), 1, -1) @ unfolded
         # samples x 1-channel x image size
-        return wxb.view(input.size(0), input.size(1), (input.shape[2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
+        return wxb.view(input.size(0), input.size(1),
+                        (input.shape[2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
                         (input.shape[3] - dilation * (kernel_size[1] - 1) - 1 + 2 * padding) // stride + 1)
 
     def forward(self, input: torch.Tensor):
@@ -193,9 +200,8 @@ class Conv2d(Module):
             for j in range(self.in_channels):
                 res = self.cross_correlation(input[:, j].view(input.size(0), 1, input.size(2), -1),
                                              self.weights[i, j].view(1, self.weights.size(2), -1), stride=self.stride,
-                                             padding=self.padding).view(self.output.size(0), self.output.size(2), self.output.size(3))
-                #slice = self.output[:, i].view(self.output.size(0), 1, self.output.size(2), self.output.size(3))
-                #slice += res
+                                             padding=self.padding).view(self.output.size(0), self.output.size(2),
+                                                                        self.output.size(3))
                 self.output[:, i] += res
             self.output[:, i] += self.biases[i]
         return self.output
@@ -204,28 +210,24 @@ class Conv2d(Module):
         self.weights_derivatives.fill_(0)
         self.biases_derivatives.fill_(0)
 
-    #@profile
+    # @profile
+    # TODO: make it process all channels together
     def backward(self, grad_wrt_output: torch.Tensor):
         self.biases_derivatives[:] += grad_wrt_output.view(self.out_channels, -1).sum(1)
         dl_dx = torch.empty((self.input.size())).fill_(0)
 
-        # Too slow doing it with iterations
         for i in range(self.out_channels):
             for j in range(self.in_channels):
-                for sample in range(self.input.size(0)):
-                    # Only works for strides even and inserts self.stride - 1 zeros
-                    dilated_grad = dilate_efficient_stride2(grad_wrt_output[sample, i])
-                    res = self.cross_correlation(self.input[sample, j].view(1, 1, self.input.size(2), -1),
-                                                dilated_grad.view(1, dilated_grad.size(0), -1), padding=self.padding)
-                    if res.view(-1).size(0) != 1:
-                        res = res.view(self.weights.size(2), -1)
-                    else:
-                        res = res.view(1, 1)
-                    self.weights_derivatives[i, j] += res
-                    res = self.cross_correlation(dilated_grad.view(1, 1, dilated_grad.size(0), -1),
-                                                    rot180(self.weights[i, j]).view(1, self.weights.size(2), -1),
-                                                    padding=(self.weights.size(2) - 1)//2)
-                    dl_dx += res
+                # ONLY WORKS WITH STRIDE == 2
+                dilated_grad = dilate_efficient_stride2(grad_wrt_output[:, i, :, :])
+                res = self.cross_correlation(self.input[:, j].view(self.input.size(0), 1, self.input.size(2), -1),
+                                             dilated_grad, padding=self.padding)
+                res = res.sum(dim=0).squeeze()
+                self.weights_derivatives[i, j] += res
+                res = self.cross_correlation(dilated_grad.unsqueeze(1),
+                                             rot180(self.weights[i, j]).view(1, self.weights.size(2), -1),
+                                             padding=(self.weights.size(2) - 1) // 2)
+                dl_dx += res
         return dl_dx
 
     def param(self):
@@ -249,14 +251,16 @@ def dilate(input: torch.Tensor, factor):
     return res
 '''
 
+
+# https://discuss.pytorch.org/t/per-channel-convolution-with-same-convolution-kernel/28160
+# TODO: make it parametric to any factor
 def dilate_efficient_stride2(input: torch.Tensor):
-    assert len(input.shape) == 2
-    #dilated_size = (2* input.size(0) - 1, 2*input.size(1) - 1)
     # Adds extra final column and row
-    dilated_size = (2* input.size(0), 2*input.size(1))
-    dilator = torch.empty(dilated_size).fill_(0).fill_diagonal_(1)[::2]
-    res = (input.t() @ dilator).t() @ dilator
+    dilated_size = (2 * input.size(1), 2 * input.size(2))
+    dilator = torch.empty(dilated_size).fill_(0).fill_diagonal_(1)[::2].unsqueeze(0).repeat(input.size(0), 1, 1)
+    res = (input.mT @ dilator.reshape(input.size(0), -1, 2 * input.size(2))).mT @ dilator
     return res
+
 
 def train_model(model, train_input, train_target, criterion, optimizer, mini_batch_size=1, epochs=1):
     for e in range(epochs):
@@ -264,9 +268,9 @@ def train_model(model, train_input, train_target, criterion, optimizer, mini_bat
         avg_loss = 0
         for b in range(0, train_input.size(0), mini_batch_size):
             output = model.forward(train_input.narrow(0, b, mini_batch_size))
-            #print(f"My Output: {output}")
+            # print(f"My Output: {output}")
             loss = criterion.forward(output, train_target.narrow(0, b, mini_batch_size))
-            #print(f"My Loss: {loss}")
+            # print(f"My Loss: {loss}")
             avg_loss += loss.item()
             model.zero_grad()
             model.backward(criterion.backward())
@@ -280,9 +284,9 @@ def train_model_torch(model, train_input, train_target, criterion, optimizer, mi
         avg_loss = 0
         for b in range(0, train_input.size(0), mini_batch_size):
             output = model(train_input.narrow(0, b, mini_batch_size))
-            #print(f"Torch Output: {output}")
+            # print(f"Torch Output: {output}")
             loss = criterion(output, train_target.narrow(0, b, mini_batch_size))
-            #print(f"Torch Loss: {loss}")
+            # print(f"Torch Loss: {loss}")
             avg_loss += loss
             optimizer.zero_grad()
             loss.backward()
@@ -290,9 +294,8 @@ def train_model_torch(model, train_input, train_target, criterion, optimizer, mi
         print(avg_loss)
 
 
-#test = torch.ones((3, 3))
+#test = torch.ones((2, 3, 3))
 #print(dilate_efficient_stride2(test))
-
 
 '''
 input = torch.arange(1, 65, dtype=torch.float32).view(2, 2, 4, 4).requires_grad_()
@@ -334,12 +337,12 @@ optimizer = SGD(model.param(), lr=0.001)
 model2 = torch.nn.Sequential(torch.nn.Conv2d(3, 32, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
                              torch.nn.Conv2d(32, 3, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
                              torch.nn.UpsamplingNearest2d(scale_factor=2), torch.nn.ReLU(),
-                            torch.nn.UpsamplingNearest2d(scale_factor=2), torch.nn.Sigmoid())
+                             torch.nn.UpsamplingNearest2d(scale_factor=2), torch.nn.Sigmoid())
 
 criterion = torch.nn.MSELoss()
 optimizer2 = torch.optim.SGD(model2.parameters(), lr=0.001)
 
-noisy_imgs1, noisy_imgs2 = torch.load('../train_data.pkl') # 50000 x 3 x 32 x 32
+noisy_imgs1, noisy_imgs2 = torch.load('../train_data.pkl')  # 50000 x 3 x 32 x 32
 noisy_imgs1 = noisy_imgs1[:500].float()
 noisy_imgs2 = noisy_imgs2[:500].float()
 
