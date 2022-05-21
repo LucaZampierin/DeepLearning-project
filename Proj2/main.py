@@ -1,10 +1,5 @@
 import torch
-from torch import empty, cat, arange
-from torch.nn.functional import fold, unfold
-
-
-# from line_profiler_pycharm import profile
-
+from torch.nn.functional import fold
 
 # torch.set_grad_enabled(False)
 
@@ -155,7 +150,8 @@ class Upsampling(Module):
         return res
 
 
-class Conv2d(Module):
+
+class Conv2d_new(Module):
     def __init__(self, in_channels, out_channels, kernel_size=(3, 3), stride=1, padding=0):
         assert stride > 0 and 0 < kernel_size[0] == kernel_size[1]
         if padding == "same":
@@ -178,32 +174,22 @@ class Conv2d(Module):
 
         self.params = [[self.weights, self.weights_derivatives], [self.biases, self.biases_derivatives]]
 
-    # @profile
     def cross_correlation(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
-        kernel_size = (kernel.size(1), kernel.size(2))
+        kernel_size = (kernel.size(-2), kernel.size(-1))
         unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding,
                                               dilation=dilation)
-        wxb = kernel.view(kernel.size(0), 1, -1) @ unfolded
+        wxb = kernel.view(kernel.size(0), kernel.size(1), kernel.size(2), 1, -1) @ unfolded.view(input.size(0), 1, input.size(1), -1, unfolded.size(-1))
         # samples x 1-channel x image size
-        return wxb.view(input.size(0), input.size(1),
+        return wxb.view(input.size(0), kernel.size(1), input.size(1),
                         (input.shape[2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
                         (input.shape[3] - dilation * (kernel_size[1] - 1) - 1 + 2 * padding) // stride + 1)
 
     def forward(self, input: torch.Tensor):
         assert input.size(1) == self.in_channels
-        output_size = ((input.shape[2] - self.kernel_size[0] + 2 * self.padding) // self.stride + 1,
-                       (input.shape[3] - self.kernel_size[1] + 2 * self.padding) // self.stride + 1)
-        self.output = torch.empty((input.size(0), self.out_channels, *output_size)).fill_(0)
         self.input = input
 
-        for i in range(self.out_channels):
-            for j in range(self.in_channels):
-                res = self.cross_correlation(input[:, j].view(input.size(0), 1, input.size(2), -1),
-                                             self.weights[i, j].view(1, self.weights.size(2), -1), stride=self.stride,
-                                             padding=self.padding).view(self.output.size(0), self.output.size(2),
-                                                                        self.output.size(3))
-                self.output[:, i] += res
-            self.output[:, i] += self.biases[i]
+        res = self.cross_correlation(input, self.weights.unsqueeze(0), stride=self.stride, padding=self.padding)
+        self.output = res.sum(2).squeeze() + self.biases.view(1, -1, 1, 1)
         return self.output
 
     def zero_grad(self):
@@ -211,32 +197,53 @@ class Conv2d(Module):
         self.biases_derivatives.fill_(0)
 
     # @profile
-    # TODO: make it process all channels together
-    def backward(self, grad_wrt_output: torch.Tensor):
-        self.biases_derivatives[:] += grad_wrt_output.view(self.out_channels, -1).sum(1)
-        dl_dx = torch.empty((self.input.size())).fill_(0)
+    def cross_correlation_test(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
+        kernel_size = (kernel.size(-2), kernel.size(-1))
+        unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding,
+                                              dilation=dilation)
+        wxb = kernel.view(kernel.size(0), kernel.size(1), 1, 1, -1) @ unfolded.view(input.size(0), 1, input.size(1), -1,
+                                                                                    unfolded.size(2))
+        # samples x 1-channel x image size
+        return wxb.view(input.size(0), kernel.size(1), input.size(1),
+                        (input.shape[2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
+                        (input.shape[3] - dilation * (kernel_size[1] - 1) - 1 + 2 * padding) // stride + 1)
 
-        for i in range(self.out_channels):
-            for j in range(self.in_channels):
-                # ONLY WORKS WITH STRIDE == 2
-                dilated_grad = dilate_efficient_stride2(grad_wrt_output[:, i, :, :])
-                res = self.cross_correlation(self.input[:, j].view(self.input.size(0), 1, self.input.size(2), -1),
-                                             dilated_grad, padding=self.padding)
-                res = res.sum(dim=0).squeeze()
-                self.weights_derivatives[i, j] += res
-                res = self.cross_correlation(dilated_grad.unsqueeze(1),
-                                             rot180(self.weights[i, j]).view(1, self.weights.size(2), -1),
-                                             padding=(self.weights.size(2) - 1) // 2)
-                dl_dx += res
-        return dl_dx
+    # @profile
+    def cross_correlation_test_2(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
+        kernel_size = (kernel.size(-2), kernel.size(-1))
+        unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding,
+                                              dilation=dilation)
+        wxb = kernel.view(kernel.size(0), kernel.size(1), kernel.size(2), 1, -1) @ unfolded.view(input.size(0),
+                                                                                                 input.size(1), 1, -1,
+                                                                                                 unfolded.size(2))
+        # samples x 1-channel x image size
+        return wxb.view(input.size(0), kernel.size(1), kernel.size(2),
+                        (input.shape[2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
+                        (input.shape[3] - dilation * (kernel_size[1] - 1) - 1 + 2 * padding) // stride + 1)
+
+    # @profile
+    # N x OUT_channels x H x W -> OUT x
+    def backward(self, grad_wrt_output: torch.Tensor):
+        self.biases_derivatives += grad_wrt_output.sum((0, 2, 3))
+
+        # ONLY WORKS WITH STRIDE == 2
+        if self.stride == 2:
+            dilated_grad = dilate_efficient_stride2(grad_wrt_output)
+        else:
+            dilated_grad = grad_wrt_output
+        res = self.cross_correlation_test(self.input, dilated_grad, padding=self.padding).sum(dim=0).squeeze()
+        self.weights_derivatives += res
+        res = self.cross_correlation_test_2(dilated_grad, rot180(self.weights).unsqueeze(0),
+                                            padding=(self.weights.size(2) - 1) // 2)
+        return res.sum(dim=1).squeeze()
 
     def param(self):
         return self.params
 
 
 def rot180(input: torch.Tensor):
-    assert len(input.shape) == 2
-    return input.rot90(2, [0, 1])
+    factor = [i for i in range(len(input.shape))][-2:]
+    return input.rot90(2, factor)
 
 
 '''
@@ -256,9 +263,10 @@ def dilate(input: torch.Tensor, factor):
 # TODO: make it parametric to any factor
 def dilate_efficient_stride2(input: torch.Tensor):
     # Adds extra final column and row
-    dilated_size = (2 * input.size(1), 2 * input.size(2))
-    dilator = torch.empty(dilated_size).fill_(0).fill_diagonal_(1)[::2].unsqueeze(0).repeat(input.size(0), 1, 1)
-    res = (input.mT @ dilator.reshape(input.size(0), -1, 2 * input.size(2))).mT @ dilator
+    dilated_size = (2 * input.size(-2), 2 * input.size(-1))
+    dilator = torch.empty(dilated_size).fill_(0).fill_diagonal_(1)[::2]  # .unsqueeze(0).repeat(input.size(0), 1, 1)
+    # add dimension of size 1 at beginning if you want to test new code
+    res = (input.mT @ dilator.reshape(1, -1, 2 * input.size(-2))).mT @ dilator
     return res
 
 
@@ -287,15 +295,20 @@ def train_model_torch(model, train_input, train_target, criterion, optimizer, mi
             # print(f"Torch Output: {output}")
             loss = criterion(output, train_target.narrow(0, b, mini_batch_size))
             # print(f"Torch Loss: {loss}")
-            avg_loss += loss
+            avg_loss += loss.item()
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
         print(avg_loss)
 
 
-#test = torch.ones((2, 3, 3))
-#print(dilate_efficient_stride2(test))
+def psnr(denoised, ground_truth):
+    mse = torch.mean((denoised - ground_truth) ** 2)
+    return -10 * torch.log10(mse + 10 ** -8)
+
+
+# test = torch.ones((2, 2, 3, 3))
+# print(dilate_efficient_stride2(test))
 
 '''
 input = torch.arange(1, 65, dtype=torch.float32).view(2, 2, 4, 4).requires_grad_()
@@ -320,19 +333,30 @@ print(torch.autograd.grad(loss, input))
 print(up2.backward(criterion2.backward()))
 '''
 
-#
 
-model = Sequential(Conv2d(3, 32, stride=2, padding=1),
-                   ReLU(),
-                   Conv2d(32, 3, stride=2, padding=1),
-                   ReLU(),
-                   Upsampling(),
-                   ReLU(),
-                   Upsampling(),
-                   Sigmoid())
+#
+def validate(model, noise_img, ground_truth):
+    psnr_tot = 0
+    for i in range(noise_img.size(0)):
+        denoised = model.forward(noise_img[i].view(1, 3, 32, 32))
+        psnr_val = psnr(denoised, ground_truth[i]).item()
+        psnr_tot += psnr_val
+    psnr_tot /= noise_img.size(0)
+    return psnr_tot
+
+
+'''
+model_new = Sequential(Conv2d_new(3, 32, stride=2, padding=1),
+                       ReLU(),
+                       Conv2d_new(32, 3, stride=2, padding=1),
+                       ReLU(),
+                       Upsampling(),
+                       ReLU(),
+                       Upsampling(),
+                       Sigmoid())
 
 loss = MSE()
-optimizer = SGD(model.param(), lr=0.001)
+optimizer_new = SGD(model_new.param(), lr=0.00001)
 
 model2 = torch.nn.Sequential(torch.nn.Conv2d(3, 32, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
                              torch.nn.Conv2d(32, 3, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
@@ -340,20 +364,24 @@ model2 = torch.nn.Sequential(torch.nn.Conv2d(3, 32, kernel_size=(3, 3), stride=(
                              torch.nn.UpsamplingNearest2d(scale_factor=2), torch.nn.Sigmoid())
 
 criterion = torch.nn.MSELoss()
-optimizer2 = torch.optim.SGD(model2.parameters(), lr=0.001)
+optimizer2 = torch.optim.SGD(model2.parameters(), lr=0.00001)
 
 noisy_imgs1, noisy_imgs2 = torch.load('../train_data.pkl')  # 50000 x 3 x 32 x 32
+val_noisy, val_clean = torch.load('../val_data.pkl')  # 50000 x 3 x 32 x 32
 noisy_imgs1 = noisy_imgs1[:500].float()
 noisy_imgs2 = noisy_imgs2[:500].float()
+val_noisy = val_noisy[:100].float()
+val_clean = val_clean[:100].float()
 
-model.modules[0].weights[:] = model2._modules['0'].weight.clone()
-model.modules[0].biases[:] = model2._modules['0'].bias.clone()
-model.modules[2].weights[:] = model2._modules['2'].weight.clone()
-model.modules[2].biases[:] = model2._modules['2'].bias.clone()
-train_model_torch(model2, noisy_imgs1, noisy_imgs2, criterion, optimizer2, epochs=3, mini_batch_size=250)
-train_model(model, noisy_imgs1, noisy_imgs2, loss, optimizer, epochs=3, mini_batch_size=250)
+model_new.modules[0].weights[:] = model2._modules['0'].weight.clone()
+model_new.modules[0].biases[:] = model2._modules['0'].bias.clone()
+model_new.modules[2].weights[:] = model2._modules['2'].weight.clone()
+model_new.modules[2].biases[:] = model2._modules['2'].bias.clone()
 
-'''
+train_model_torch(model2, noisy_imgs1, noisy_imgs2, criterion, optimizer2, epochs=1, mini_batch_size=50)
+with torch.no_grad():
+    train_model(model_new, noisy_imgs1, noisy_imgs2, loss, optimizer_new, epochs=1, mini_batch_size=50)
+
 train_input = torch.empty((4, 1, 8, 8)).fill_(1).requires_grad_()
 train_target = torch.empty((4, 1, 8, 8)).fill_(2)
 model.modules[0].weights[:] = model2._modules['0'].weight.clone()
@@ -391,15 +419,32 @@ print(torch.autograd.grad(l2, train_input))
 
 '''
 
-'''
-x = torch.empty((2, 2, 4, 4)).fill_(2)
-conv2 = torch.nn.Conv2d(2, 2, kernel_size=(3, 3), stride=(2, 2))
-print(conv2(x))
-conv = Conv2d(2, 2,padding=0,stride=2)
-conv.weights = conv2.weight
-conv.biases = conv2.bias
-print(conv.forward(x))
-'''
+# TODO: IF OUT_CHANNELS OR IN_CHANNELS ARE 1 HAVING MORE THAN 1 SAMPLE BREAKS THINGS
+# TODO: handle arbitrary strides
+# TODO: get rid of loop upsampling
+# TODO: adapt to test.py
+
+conv2 = torch.nn.Conv2d(2, 2, kernel_size=(3, 3), stride=(2, 2), padding=1)
+convnew = Conv2d_new(2, 2,padding=1, stride=2)
+convnew.weights = conv2.weight.clone()
+convnew.biases = conv2.bias.clone()
+
+criterion = torch.nn.MSELoss()
+lossnew = MSE()
+train_input = torch.empty((2, 2, 4, 4)).fill_(1).requires_grad_()
+train_target = torch.empty((2, 2, 2, 2)).fill_(2)
+
+l2 = criterion(conv2(train_input), train_target)
+#l2.backward()
+print(l2)
+print(torch.autograd.grad(l2, train_input))
+
+with torch.no_grad():
+    l_new = lossnew.forward(convnew.forward(train_input), train_target)
+    print(l_new)
+    print(convnew.backward(lossnew.backward()))
+
+
 '''
 print(x)
 print(cross_correlation(x, kernel, 2, 1, 1))
