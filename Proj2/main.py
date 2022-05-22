@@ -148,32 +148,51 @@ class Sequential(Module):
 
 
 class MSE(Module):
+    """
+    Mean-Square Error loss implementation.
+    """
     def __init__(self):
         super().__init__()
 
     def forward(self, *input: torch.Tensor):
+        """
+        The loss is computed as the mean of the squared difference between target and input
+        :param input: tuple of (input, target)
+        :return: MSE loss
+        """
         assert len(input) == 2
         input, target = input[0], input[1]
         self.input = (target - input)  # NxCxHxW
         return (self.input ** 2).mean()
 
     def backward(self, *grad_wrt_output: torch.Tensor):
-        # added terms to make it equal to pytorch
+        """
+        :return: returns the derivative of the loss with respect to (input - target)
+        """
         return -(2 / (self.input.size(0) * self.input.size(1) * self.input.size(2) * self.input.size(3))) * self.input
 
 
 class SGD:
+    """
+    Implementation of a Stochastic Gradient Descent Optimizer with no momentum.
+    """
     def __init__(self, network_parameters, lr=0.01):
         self.network_parameters = network_parameters
         self.lr = lr
 
     def step(self):
-        '''Network Parameters can be a list of tuples (param tensor, grad tensor)'''
+        """
+        Applies a step towards the line of maximum slope to all parameters of the network given their derivatives.
+        Parameters are in the form (parameter, gradient_wrt_loss_of_parameter)
+        """
         for p in self.network_parameters:
             p[0] -= self.lr * p[1]
 
 
 class Upsampling(Module):
+    """
+    Implementation of a Nearest Neighbor Upsampling.
+    """
     def __init__(self, scale_factor=2):
         super().__init__()
         self.scale_factor = scale_factor
@@ -182,23 +201,47 @@ class Upsampling(Module):
         pass
 
     def forward(self, input: torch.Tensor):
+        """
+        Returns the upsampled version of the input tensor according to nearest-neighbor policy.
+        :param input: (N x C x H x W) input tensor
+        :return: (N x C x H*factor x W*factor) upsampled output
+        """
         assert len(input.shape) == 4
         self.input = input
+
+        # Duplicates and interleaves the tensor horizontally and the vertically wrt to image plane
+        #                   123         112233
+        #       123         123         112233
+        #       456 -->     456 -->     445566
+        #       789         456         445566
+        #                   789         778899
+        #                   789         778899
 
         self.output = self.input.repeat_interleave(self.scale_factor, dim=-2).repeat_interleave(self.scale_factor, dim=-1)
         return self.output
 
     # Sum of patches of gradients
     def backward(self, grad_wrt_output: torch.Tensor):
+        """
+        Returns the gradient of the output wrt to input by summing across patches of size (factor, factor).
+        :param grad_wrt_output: gradient of loss wrt output
+        :return: gradient of loss wrt to input to upsampling
+        """
         unfolded = torch.nn.functional.unfold(grad_wrt_output, kernel_size=self.scale_factor, stride=self.scale_factor)
         res = unfolded.view(unfolded.size(0), grad_wrt_output.size(1), self.scale_factor ** 2, -1).sum(dim=2).view(unfolded.size(0), grad_wrt_output.size(1), grad_wrt_output.size(2) // self.scale_factor, grad_wrt_output.size(3) // self.scale_factor)
         return res
 
 
-
-class Conv2d_new(Module):
-    def __init__(self, in_channels, out_channels, kernel_size=(3, 3), stride=1, padding=0):
-        assert stride > 0 and 0 < kernel_size[0] == kernel_size[1]
+class Conv2d(Module):
+    """
+    Implementation of a Convolutional Layer of arbitrary kernel, stride, and padding.
+    Padding of 'same' is computed before applying any stride and aims at keeping unchanged the output without considering
+    potential effects of a strided convolution.
+    NOTE: **Kernel is square**
+    """
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0):
+        assert stride > 0 and kernel_size > 0
+        kernel_size = (kernel_size, kernel_size)
         if padding == "same":
             assert stride == 1
             padding = (kernel_size[0] - 1) // 2
@@ -211,7 +254,6 @@ class Conv2d_new(Module):
 
         # Glorot Initialization
         std_weights = 6.0 / (in_channels + out_channels)
-        std_bias = 1
         self.weights = torch.empty((out_channels, in_channels, *kernel_size)).uniform_(-std_weights, std_weights)
         self.weights_derivatives = torch.empty(self.weights.size()).fill_(0)
         self.biases = torch.empty(out_channels).uniform_(-std_weights, std_weights)
@@ -230,6 +272,11 @@ class Conv2d_new(Module):
                         (input.shape[3] - dilation * (kernel_size[1] - 1) - 1 + 2 * padding) // stride + 1)
 
     def forward(self, input: torch.Tensor):
+        """
+        Computes the forward pass with the internal weights of the given input
+        :param input: tensor of shape (N x C_in x H x W)
+        :return: input convolved with internal weights + bias
+        """
         assert input.size(1) == self.in_channels
         self.input = input
 
@@ -238,10 +285,12 @@ class Conv2d_new(Module):
         return self.output
 
     def zero_grad(self):
+        """
+        Zeroes the gradients of the weights and biases.
+        """
         self.weights_derivatives.fill_(0)
         self.biases_derivatives.fill_(0)
 
-    # @profile
     def cross_correlation_test(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
         kernel_size = (kernel.size(-2), kernel.size(-1))
         unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding,
@@ -253,7 +302,6 @@ class Conv2d_new(Module):
                         (input.shape[2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
                         (input.shape[3] - dilation * (kernel_size[1] - 1) - 1 + 2 * padding) // stride + 1)
 
-    # @profile
     def cross_correlation_test_2(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
         kernel_size = (kernel.size(-2), kernel.size(-1))
         unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding,
@@ -266,9 +314,13 @@ class Conv2d_new(Module):
                         (input.shape[2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
                         (input.shape[3] - dilation * (kernel_size[1] - 1) - 1 + 2 * padding) // stride + 1)
 
-    # @profile
-    # N x OUT_channels x H x W -> OUT x
     def backward(self, grad_wrt_output: torch.Tensor):
+        """
+        Computes the gradient of the loss wrt to the input tensor as well as the accumulation of gradient of loss
+        with respect to the internal weights and biases.
+        :param grad_wrt_output: gradient of loss wrt to output tensor of the forward pass
+        :return: gradient of loss wrt to input to the layer
+        """
         self.biases_derivatives += grad_wrt_output.sum((0, 2, 3))
         dilated_grad = dilate_efficient(grad_wrt_output, factor=self.stride)
         res = self.cross_correlation_test(self.input, dilated_grad, padding=self.padding).sum(dim=0).squeeze()
@@ -278,8 +330,11 @@ class Conv2d_new(Module):
         return res.sum(dim=1).squeeze()
 
     def param(self):
+        """
+        :return: parameter list to allow for optimizer's step as tuple of [(weights, derivative_weights), (bias,
+        derivative_bias)]
+        """
         return self.params
-
 
 
 def train_model(model, train_input, train_target, criterion, optimizer, mini_batch_size=1, epochs=1):
@@ -318,35 +373,6 @@ def psnr(denoised, ground_truth):
     mse = torch.mean((denoised - ground_truth) ** 2)
     return -10 * torch.log10(mse + 10 ** -8)
 
-
-#test = torch.ones((2, 2, 2, 2))
-#print(dilate_efficient_stride2(test, factor=2))
-#print(dilate_efficient_stride2(test, factor=3))
-'''
-input = torch.arange(1, 65, dtype=torch.float32).view(2, 2, 4, 4).requires_grad_()
-target = torch.empty((2, 2, 8, 8)).fill_(2)
-
-up = torch.nn.UpsamplingNearest2d(scale_factor=2)
-criterion = torch.nn.MSELoss()
-output = up(input)
-print(f"Torch_out: {output}")
-
-up2 = Upsampling()
-criterion2 = MSE()
-output2 = up2.forward(input)
-print(f"Our_out: {output2}")
-
-loss = criterion(output, target)
-print(f"Torch_loss: {loss}")
-loss2 = criterion2.forward(output2, target)
-print(f"Our_loss: {loss2}")
-
-print(torch.autograd.grad(loss, input))
-print(up2.backward(criterion2.backward()))
-'''
-
-
-#
 def validate(model, noise_img, ground_truth):
     psnr_tot = 0
     for i in range(noise_img.size(0)):
@@ -357,9 +383,9 @@ def validate(model, noise_img, ground_truth):
     return psnr_tot
 
 
-model_new = Sequential(Conv2d_new(3, 32, stride=2, padding=1),
+model_new = Sequential(Conv2d(3, 32, stride=2, padding=1),
                        ReLU(),
-                       Conv2d_new(32, 3, stride=2, padding=1),
+                       Conv2d(32, 3, stride=2, padding=1),
                        ReLU(),
                        Upsampling(),
                        ReLU(),
@@ -389,82 +415,13 @@ model_new.modules[0].biases[:] = model2._modules['0'].bias.clone()
 model_new.modules[2].weights[:] = model2._modules['2'].weight.clone()
 model_new.modules[2].biases[:] = model2._modules['2'].bias.clone()
 
-train_model_torch(model2, noisy_imgs1, noisy_imgs2, criterion, optimizer2, epochs=10, mini_batch_size=250)
+train_model_torch(model2, noisy_imgs1, noisy_imgs2, criterion, optimizer2, epochs=1, mini_batch_size=250)
 with torch.no_grad():
-    train_model(model_new, noisy_imgs1, noisy_imgs2, loss, optimizer_new, epochs=10, mini_batch_size=250)
+    train_model(model_new, noisy_imgs1, noisy_imgs2, loss, optimizer_new, epochs=1, mini_batch_size=250)
 
 
 
-# print(model.forward(train_input.clone()))
-# print(model2(train_input.clone()))
-'''
-
-criterion = torch.nn.MSELoss()
-sig = torch.nn.ReLU()
-loss = MSE()
-sig2 = ReLU()
-train_input = torch.empty((2, 1, 4, 4)).fill_(1).requires_grad_()
-train_target = torch.empty((2, 1, 4, 4)).fill_(2)
-l = loss.forward(train_input.detach(), train_target.detach())
-l2 = criterion(train_input, train_target)
-print(l)
-print(loss.backward())
-print(l2)
-print(torch.autograd.grad(l2, train_input))
-
-#s = sig2.forward(train_input)
-#s2 = sig(train_input)
-#print(s)
-#print(s2)
-
-#print(sig2.backward(torch.empty(train_target.size()).fill_(1)))
-#print(torch.autograd.grad(s2.sum(), train_input))
-
-'''
 
 # TODO: adapt to test.py
 # TODO: finish documentation
 # TODO: clean up code and separate modules
-
-'''
-conv2 = torch.nn.Conv2d(5, 1, kernel_size=(3, 3), stride=(1, 1), padding=1)
-convnew = Conv2d_new(5, 1,padding=1, stride=1)
-convnew.weights = conv2.weight.clone()
-convnew.biases = conv2.bias.clone()
-
-criterion = torch.nn.MSELoss()
-lossnew = MSE()
-train_input = torch.empty((5, 5, 4, 4)).fill_(1).requires_grad_()
-train_target = torch.empty((5, 1, 4, 4)).fill_(2)
-
-l2 = criterion(conv2(train_input), train_target)
-#l2.backward()
-print(l2)
-print(torch.autograd.grad(l2, train_input))
-
-with torch.no_grad():
-    l_new = lossnew.forward(convnew.forward(train_input), train_target)
-    print(l_new)
-    print(convnew.backward(lossnew.backward()))
-
-
-'''
-'''
-print(x)
-print(cross_correlation(x, kernel, 2, 1, 1))
-'''
-
-'''
-input = torch.empty((3, 5)).normal_().requires_grad_()
-relu = torch.nn.ReLU()
-mine_relu = ReLU()
-act_relu = relu(input)
-act_mine = mine_relu.forward(input)
-
-print(f"Activations: \n\t{act_relu} \n\t{act_mine}")
-
-act_relu.backward()
-print(act_relu.grad)
-
-#target = torch.empty((3, 5)).normal_().requires_grad_()
-'''
