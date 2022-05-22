@@ -1,10 +1,14 @@
 import torch
 from torch.nn.functional import fold
+from utils import *
 
 # torch.set_grad_enabled(False)
 
 
 class Module(object):
+    """
+    Base module class that is inherited from by every component of the framework.
+    """
     def __init__(self):
         self.input = torch.empty(0)
         self.output = torch.empty(0)
@@ -23,6 +27,11 @@ class Module(object):
 
 
 class Activation(Module):
+    """
+    Base activation class that is extended by activation implementations.
+    Each activation function must define its forward method (the function itself) and its derivative.
+    All activation functions share the same gradient structure.
+    """
     def __init__(self, act, act_derivative):
         super().__init__()
         self.activation = act
@@ -37,11 +46,21 @@ class Activation(Module):
 
 
 class ReLU(Activation):
+    """
+    ReLU activation function.
+    It introduces a non-linearity by returning the max(0, x) element-wise.
+    """
     def __init__(self):
-        def relu(input):
+        def relu(input: torch.Tensor):
+            """
+            Clamps all negative values to 0.
+            """
             return input.clamp(0, None)
 
-        def relu_prime(input):
+        def relu_prime(input: torch.Tensor):
+            """
+            Derivative of ReLU is 0 for negative values and 1 for positive values.
+            """
             res = input.where(input <= 0, torch.empty(input.size()).fill_(1)).clamp(0, None)
             return res
 
@@ -49,18 +68,38 @@ class ReLU(Activation):
 
 
 class Sigmoid(Activation):
+    """
+    Sigmoid activation function.
+    It introduces a non-linearity by returning the sigmoid of the given tensor.
+    """
     def __init__(self):
-        def logistic_func(input):
+        def logistic_func(input: torch.Tensor):
+            """
+            Applies the sigmoid function to the input element-wise.
+
+            :param input: input Tensor
+            :return: e^(input) / ( e^(input) + 1 )
+            """
             return input.sigmoid()
 
-        def logistic_func_prime(input):
-            # maybe do input.sigmoid() * (1 - input.sigmoid())
-            return input.sigmoid() * (torch.empty(input.size()).fill_(1) - input.sigmoid())
+        def logistic_func_prime(input: torch.Tensor):
+            """
+            Derivative of sigmoid is S(x) * (1 - S(x))
+
+            :param input: input Tensor
+            :return: S(x) * (1 - S(x)) element-wise
+            """
+            return input.sigmoid() * (1 - input.sigmoid())
 
         super().__init__(logistic_func, logistic_func_prime)
 
 
 class Sequential(Module):
+    """
+    Basic container to implement simple sequential networks.
+    Allows to specify an arbitrary number of modules and saves internally the
+    list of all parameters to be passed to an optimizer.
+    """
     def __init__(self, *modules):
         super().__init__()
         self.modules = modules
@@ -70,20 +109,41 @@ class Sequential(Module):
             self.params.extend(module.param())
 
     def zero_grad(self):
+        """
+        Invokes the zero_grad method of all methods to clear out the grad field.
+        """
         for module in self.modules:
             module.zero_grad()
 
     def forward(self, input: torch.Tensor):
+        """
+        Computes the result of the forward pass of the network by invoking sequentially all modules
+        with the output of the previous one.
+
+        :param input: input Tensor to the network
+        :return: result of the forward pass
+        """
         for module in self.modules:
             input = module.forward(input)
         return input
 
     def backward(self, grad_wrt_output: torch.Tensor):
+        """
+        Computes the result of the backward pass of the network by invoking sequentially all modules
+        in reverse order to provide the derivative of the loss with respect to the inputs of
+        module i as input to the backward pass of module i - 1.
+
+        :param input: derivative of the predicted output with respect to the input to the loss
+        :return: result of the backward pass (derivative of loss with respect to input tensor to network)
+        """
         for i in reversed(range(len(self.modules))):
             grad_wrt_output = self.modules[i].backward(grad_wrt_output)
         return grad_wrt_output
 
     def param(self):
+        """
+        :return: returns the parameter list of the whole network.
+        """
         return self.params
 
 
@@ -113,7 +173,6 @@ class SGD:
             p[0] -= self.lr * p[1]
 
 
-# Nearest Neighbour upsampling
 class Upsampling(Module):
     def __init__(self, scale_factor=2):
         super().__init__()
@@ -123,30 +182,16 @@ class Upsampling(Module):
         pass
 
     def forward(self, input: torch.Tensor):
+        assert len(input.shape) == 4
         self.input = input
-        # supports input of arbitrary dimension
-        output_size = [self.input.size(0), self.input.size(1)] + [int(float(input.size(i + 2)) * self.scale_factor) for
-                                                                  i in range(self.input.dim() - 2)]
-        self.output = torch.empty(output_size)
 
-        for y in range(self.output.size(dim=3)):
-            for x in range(self.output.size(dim=2)):
-                self.output[:, :, x, y] = self.input[:, :, int(x / self.scale_factor), int(y / self.scale_factor)]
+        self.output = self.input.repeat_interleave(self.scale_factor, dim=-2).repeat_interleave(self.scale_factor, dim=-1)
         return self.output
 
     # Sum of patches of gradients
     def backward(self, grad_wrt_output: torch.Tensor):
-        res = torch.empty((grad_wrt_output.size(0), grad_wrt_output.size(1),
-                           grad_wrt_output.size(2) // self.scale_factor,
-                           grad_wrt_output.size(3) // self.scale_factor)).fill_(0)
-        for c in range(grad_wrt_output.size(1)):
-            unfolded = torch.nn.functional.unfold(
-                grad_wrt_output[:, c, :, :].view(grad_wrt_output.size(0), 1, grad_wrt_output.size(2),
-                                                 grad_wrt_output.size(3)), kernel_size=self.scale_factor,
-                stride=self.scale_factor)
-            res[:, c, :, :] += unfolded.sum(dim=1).view(grad_wrt_output.size(0), 1,
-                                                        grad_wrt_output.size(2) // self.scale_factor,
-                                                        grad_wrt_output.size(3) // self.scale_factor).squeeze()
+        unfolded = torch.nn.functional.unfold(grad_wrt_output, kernel_size=self.scale_factor, stride=self.scale_factor)
+        res = unfolded.view(unfolded.size(0), grad_wrt_output.size(1), self.scale_factor ** 2, -1).sum(dim=2).view(unfolded.size(0), grad_wrt_output.size(1), grad_wrt_output.size(2) // self.scale_factor, grad_wrt_output.size(3) // self.scale_factor)
         return res
 
 
@@ -236,23 +281,6 @@ class Conv2d_new(Module):
         return self.params
 
 
-def rot180(input: torch.Tensor):
-    factor = [i for i in range(len(input.shape))][-2:]
-    return input.rot90(2, factor)
-
-
-
-# Dilation of 1 means no dilation
-# Interleaves each column and row with (factor - 1) zeros
-def dilate_efficient(input: torch.Tensor, factor: int):
-    assert factor > 0
-    if factor == 1:
-        return input
-    dilated_size = (factor * input.size(-2), factor * input.size(-1))
-    dilator = torch.empty(dilated_size).fill_(0).fill_diagonal_(1)[::factor]
-    res = (input.mT @ dilator.reshape(1, -1, factor * input.size(-2))).mT @ dilator
-    return res
-
 
 def train_model(model, train_input, train_target, criterion, optimizer, mini_batch_size=1, epochs=1):
     for e in range(epochs):
@@ -329,7 +357,6 @@ def validate(model, noise_img, ground_truth):
     return psnr_tot
 
 
-'''
 model_new = Sequential(Conv2d_new(3, 32, stride=2, padding=1),
                        ReLU(),
                        Conv2d_new(32, 3, stride=2, padding=1),
@@ -362,20 +389,12 @@ model_new.modules[0].biases[:] = model2._modules['0'].bias.clone()
 model_new.modules[2].weights[:] = model2._modules['2'].weight.clone()
 model_new.modules[2].biases[:] = model2._modules['2'].bias.clone()
 
-train_model_torch(model2, noisy_imgs1, noisy_imgs2, criterion, optimizer2, epochs=1, mini_batch_size=50)
+train_model_torch(model2, noisy_imgs1, noisy_imgs2, criterion, optimizer2, epochs=10, mini_batch_size=250)
 with torch.no_grad():
-    train_model(model_new, noisy_imgs1, noisy_imgs2, loss, optimizer_new, epochs=1, mini_batch_size=50)
+    train_model(model_new, noisy_imgs1, noisy_imgs2, loss, optimizer_new, epochs=10, mini_batch_size=250)
 
-train_input = torch.empty((4, 1, 8, 8)).fill_(1).requires_grad_()
-train_target = torch.empty((4, 1, 8, 8)).fill_(2)
-model.modules[0].weights[:] = model2._modules['0'].weight.clone()
-model.modules[0].biases[:] = model2._modules['0'].bias.clone()
-model.modules[2].weights[:] = model2._modules['2'].weight.clone()
-model.modules[2].biases[:] = model2._modules['2'].bias.clone()
-train_model(model, train_input, train_target, loss, optimizer, epochs=10, mini_batch_size=2)
-train_model_torch(model2, train_input, train_target, criterion, optimizer2, epochs=10, mini_batch_size=2)
 
-'''
+
 # print(model.forward(train_input.clone()))
 # print(model2(train_input.clone()))
 '''
@@ -403,9 +422,11 @@ print(torch.autograd.grad(l2, train_input))
 
 '''
 
-# TODO: get rid of loop upsampling
 # TODO: adapt to test.py
+# TODO: finish documentation
+# TODO: clean up code and separate modules
 
+'''
 conv2 = torch.nn.Conv2d(5, 1, kernel_size=(3, 3), stride=(1, 1), padding=1)
 convnew = Conv2d_new(5, 1,padding=1, stride=1)
 convnew.weights = conv2.weight.clone()
@@ -427,6 +448,7 @@ with torch.no_grad():
     print(convnew.backward(lossnew.backward()))
 
 
+'''
 '''
 print(x)
 print(cross_correlation(x, kernel, 2, 1, 1))
