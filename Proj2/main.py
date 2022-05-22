@@ -189,7 +189,7 @@ class Conv2d_new(Module):
         self.input = input
 
         res = self.cross_correlation(input, self.weights.unsqueeze(0), stride=self.stride, padding=self.padding)
-        self.output = res.sum(2).squeeze() + self.biases.view(1, -1, 1, 1)
+        self.output = res.sum(2) + self.biases.view(1, -1, 1, 1)
         return self.output
 
     def zero_grad(self):
@@ -225,12 +225,7 @@ class Conv2d_new(Module):
     # N x OUT_channels x H x W -> OUT x
     def backward(self, grad_wrt_output: torch.Tensor):
         self.biases_derivatives += grad_wrt_output.sum((0, 2, 3))
-
-        # ONLY WORKS WITH STRIDE == 2
-        if self.stride == 2:
-            dilated_grad = dilate_efficient_stride2(grad_wrt_output)
-        else:
-            dilated_grad = grad_wrt_output
+        dilated_grad = dilate_efficient(grad_wrt_output, factor=self.stride)
         res = self.cross_correlation_test(self.input, dilated_grad, padding=self.padding).sum(dim=0).squeeze()
         self.weights_derivatives += res
         res = self.cross_correlation_test_2(dilated_grad, rot180(self.weights).unsqueeze(0),
@@ -246,27 +241,16 @@ def rot180(input: torch.Tensor):
     return input.rot90(2, factor)
 
 
-'''
-def dilate(input: torch.Tensor, factor):
-    assert len(input.shape) == 2
-    assert factor > 1 and factor % 2 == 0
-    output_size = (input.size(0) + (input.size(0) - 1)*(factor - 1) + factor - 1, input.size(1) + (input.size(1) - 1)*(factor - 1) + factor - 1)
-    res = torch.empty(output_size).fill_(0)
-    for i, h in enumerate(range(0, output_size[0] - factor//2, factor)):
-        for j, w in enumerate(range(0, output_size[1] - factor//2, factor)):
-            res[h, w] = input[i, j]
-    return res
-'''
 
-
-# https://discuss.pytorch.org/t/per-channel-convolution-with-same-convolution-kernel/28160
-# TODO: make it parametric to any factor
-def dilate_efficient_stride2(input: torch.Tensor):
-    # Adds extra final column and row
-    dilated_size = (2 * input.size(-2), 2 * input.size(-1))
-    dilator = torch.empty(dilated_size).fill_(0).fill_diagonal_(1)[::2]  # .unsqueeze(0).repeat(input.size(0), 1, 1)
-    # add dimension of size 1 at beginning if you want to test new code
-    res = (input.mT @ dilator.reshape(1, -1, 2 * input.size(-2))).mT @ dilator
+# Dilation of 1 means no dilation
+# Interleaves each column and row with (factor - 1) zeros
+def dilate_efficient(input: torch.Tensor, factor: int):
+    assert factor > 0
+    if factor == 1:
+        return input
+    dilated_size = (factor * input.size(-2), factor * input.size(-1))
+    dilator = torch.empty(dilated_size).fill_(0).fill_diagonal_(1)[::factor]
+    res = (input.mT @ dilator.reshape(1, -1, factor * input.size(-2))).mT @ dilator
     return res
 
 
@@ -307,9 +291,9 @@ def psnr(denoised, ground_truth):
     return -10 * torch.log10(mse + 10 ** -8)
 
 
-# test = torch.ones((2, 2, 3, 3))
-# print(dilate_efficient_stride2(test))
-
+#test = torch.ones((2, 2, 2, 2))
+#print(dilate_efficient_stride2(test, factor=2))
+#print(dilate_efficient_stride2(test, factor=3))
 '''
 input = torch.arange(1, 65, dtype=torch.float32).view(2, 2, 4, 4).requires_grad_()
 target = torch.empty((2, 2, 8, 8)).fill_(2)
@@ -419,20 +403,18 @@ print(torch.autograd.grad(l2, train_input))
 
 '''
 
-# TODO: IF OUT_CHANNELS OR IN_CHANNELS ARE 1 HAVING MORE THAN 1 SAMPLE BREAKS THINGS
-# TODO: handle arbitrary strides
 # TODO: get rid of loop upsampling
 # TODO: adapt to test.py
 
-conv2 = torch.nn.Conv2d(2, 2, kernel_size=(3, 3), stride=(2, 2), padding=1)
-convnew = Conv2d_new(2, 2,padding=1, stride=2)
+conv2 = torch.nn.Conv2d(5, 1, kernel_size=(3, 3), stride=(1, 1), padding=1)
+convnew = Conv2d_new(5, 1,padding=1, stride=1)
 convnew.weights = conv2.weight.clone()
 convnew.biases = conv2.bias.clone()
 
 criterion = torch.nn.MSELoss()
 lossnew = MSE()
-train_input = torch.empty((2, 2, 4, 4)).fill_(1).requires_grad_()
-train_target = torch.empty((2, 2, 2, 2)).fill_(2)
+train_input = torch.empty((5, 5, 4, 4)).fill_(1).requires_grad_()
+train_target = torch.empty((5, 1, 4, 4)).fill_(2)
 
 l2 = criterion(conv2(train_input), train_target)
 #l2.backward()
