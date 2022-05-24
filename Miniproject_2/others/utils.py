@@ -11,7 +11,7 @@ def rot180(input: torch.Tensor):
     return input.rot90(2, factor)
 
 
-def dilate_efficient(input: torch.Tensor, factor: int):
+def dilate_efficient(input: torch.Tensor, factor: int, device="cpu"):
     """
     Interleaves the input tensor's columns and rows with (factor - 1) zeros.
     Factor of 1 means no dilation.
@@ -24,7 +24,7 @@ def dilate_efficient(input: torch.Tensor, factor: int):
     if factor == 1:
         return input
     dilated_size = (factor * input.size(-2), factor * input.size(-1))
-    dilator = torch.empty(dilated_size).fill_(0).fill_diagonal_(1)[::factor]
+    dilator = torch.empty(dilated_size).fill_(0).fill_diagonal_(1)[::factor].to(device)
     res = (input.mT @ dilator.reshape(1, -1, factor * input.size(-2))).mT @ dilator
     return res
 

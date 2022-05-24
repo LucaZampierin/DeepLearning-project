@@ -12,6 +12,7 @@ class Module(object):
     def __init__(self):
         self.input = torch.empty(0)
         self.output = torch.empty(0)
+        self.device = "cpu"
 
     def forward(self, *input: torch.Tensor):
         raise NotImplementedError
@@ -24,6 +25,10 @@ class Module(object):
 
     def param(self):
         return []
+
+    def to_cuda(self):
+        if torch.cuda.is_available():
+            self.device = "cuda"
 
 
 class Activation(Module):
@@ -63,7 +68,7 @@ class ReLU(Activation):
             """
             Derivative of ReLU is 0 for negative values and 1 for positive values.
             """
-            res = input.where(input <= 0, torch.empty(input.size()).fill_(1)).clamp(0, None)
+            res = input.where(input <= 0, torch.empty(input.size()).fill_(1).to(self.device)).clamp(0, None)
             return res
 
         super().__init__(relu, relu_prime)
@@ -111,6 +116,10 @@ class Sequential(Module):
 
         for module in self.modules:
             self.params.extend(module.param())
+
+    def to_cuda(self):
+        for module in self.modules:
+            module.to_cuda()
 
     def zero_grad(self):
         """
@@ -247,23 +256,31 @@ class Conv2d(Module):
 
         # Glorot Initialization
         std_weights = 6.0 / (in_channels + out_channels)
-        self.weights = torch.empty((out_channels, in_channels, *kernel_size)).uniform_(-std_weights, std_weights)
-        self.weights_derivatives = torch.empty(self.weights.size()).fill_(0)
-        self.biases = torch.empty(out_channels).uniform_(-std_weights, std_weights)
-        self.biases_derivatives = torch.empty(self.biases.size()).fill_(0)
+        self.weights = torch.empty((out_channels, in_channels, *kernel_size)).uniform_(-std_weights, std_weights).to(self.device)
+        self.weights_derivatives = torch.empty(self.weights.size()).fill_(0).to(self.device)
+        self.biases = torch.empty(out_channels).uniform_(-std_weights, std_weights).to(self.device)
+        self.biases_derivatives = torch.empty(self.biases.size()).fill_(0).to(self.device)
 
         self.params = [[self.weights, self.weights_derivatives], [self.biases, self.biases_derivatives]]
 
+    def to_cuda(self):
+        if torch.cuda.is_available():
+            self.device = "cuda"
+            self.weights = self.weights.to("cuda")
+            self.weights_derivatives = self.weights_derivatives.to("cuda")
+            self.biases = self.biases.to("cuda")
+            self.biases_derivatives = self.biases_derivatives.to("cuda")
+
     def cross_correlation(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
         kernel_size = (kernel.size(-2), kernel.size(-1))
-        unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding,
+        unfolded = torch.nn.functional.unfold(input.squeeze(1), kernel_size=kernel_size, stride=stride, padding=padding,
                                               dilation=dilation)
-        wxb = kernel.view(kernel.size(0), kernel.size(1), kernel.size(2), 1, -1) @ unfolded.view(input.size(0), 1,
-                                                                                                 input.size(1), -1,
+        wxb = kernel.view(kernel.size(0), kernel.size(1), kernel.size(2), 1, -1) @ unfolded.view(input.size(0), input.size(1),
+                                                                                                 input.size(2), -1,
                                                                                                  unfolded.size(-1))
-        return wxb.view(input.size(0), kernel.size(1), input.size(1),
-                        (input.shape[2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
-                        (input.shape[3] - dilation * (kernel_size[1] - 1) - 1 + 2 * padding) // stride + 1)
+        return wxb.view(input.size(0), kernel.size(1), input.size(2),
+                        (input.shape[-2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
+                        (input.shape[-1] - dilation * (kernel_size[1] - 1) - 1 + 2 * padding) // stride + 1)
 
     def forward(self, input: torch.Tensor):
         """
@@ -274,7 +291,7 @@ class Conv2d(Module):
         assert input.size(1) == self.in_channels
         self.input = input
 
-        res = self.cross_correlation(input, self.weights.unsqueeze(0), stride=self.stride, padding=self.padding)
+        res = self.cross_correlation(input.unsqueeze(1), self.weights.unsqueeze(0), stride=self.stride, padding=self.padding)
         self.output = res.sum(2) + self.biases.view(1, -1, 1, 1)
         return self.output
 
@@ -285,26 +302,16 @@ class Conv2d(Module):
         self.weights_derivatives.fill_(0)
         self.biases_derivatives.fill_(0)
 
-    def cross_correlation_test(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
-        kernel_size = (kernel.size(-2), kernel.size(-1))
-        unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding,
-                                              dilation=dilation)
-        wxb = kernel.view(kernel.size(0), kernel.size(1), 1, 1, -1) @ unfolded.view(input.size(0), 1, input.size(1), -1,
-                                                                                    unfolded.size(2))
-        return wxb.view(input.size(0), kernel.size(1), input.size(1),
-                        (input.shape[2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
-                        (input.shape[3] - dilation * (kernel_size[1] - 1) - 1 + 2 * padding) // stride + 1)
-
-    def cross_correlation_test_2(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
+    def cross_correlation_backward(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
         kernel_size = (kernel.size(-2), kernel.size(-1))
         unfolded = torch.nn.functional.unfold(input, kernel_size=kernel_size, stride=stride, padding=padding,
                                               dilation=dilation)
         wxb = kernel.view(kernel.size(0), kernel.size(1), kernel.size(2), 1, -1) @ unfolded.view(input.size(0),
                                                                                                  input.size(1), 1, -1,
-                                                                                                 unfolded.size(2))
+                                                                                                 unfolded.size(-1))
         return wxb.view(input.size(0), kernel.size(1), kernel.size(2),
-                        (input.shape[2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
-                        (input.shape[3] - dilation * (kernel_size[1] - 1) - 1 + 2 * padding) // stride + 1)
+                        (input.shape[-2] - dilation * (kernel_size[0] - 1) - 1 + 2 * padding) // stride + 1,
+                        (input.shape[-1] - dilation * (kernel_size[1] - 1) - 1 + 2 * padding) // stride + 1)
 
     def backward(self, grad_wrt_output: torch.Tensor):
         """
@@ -314,10 +321,10 @@ class Conv2d(Module):
         :return: gradient of loss wrt to input to the layer
         """
         self.biases_derivatives += grad_wrt_output.sum((0, 2, 3))
-        dilated_grad = dilate_efficient(grad_wrt_output, factor=self.stride)
-        res = self.cross_correlation_test(self.input, dilated_grad, padding=self.padding).sum(dim=0).squeeze()
+        dilated_grad = dilate_efficient(grad_wrt_output, factor=self.stride, device=self.device)
+        res = self.cross_correlation(self.input.unsqueeze(1), dilated_grad.unsqueeze(2), padding=self.padding).sum(dim=0)#.squeeze()
         self.weights_derivatives += res
-        res = self.cross_correlation_test_2(dilated_grad, rot180(self.weights).unsqueeze(0),
+        res = self.cross_correlation_backward(dilated_grad, rot180(self.weights).unsqueeze(0),
                                             padding=(self.weights.size(2) - 1) // 2)
         return res.sum(dim=1).squeeze()
 
@@ -340,41 +347,39 @@ class SGD:
     Implementation of a Stochastic Gradient Descent Optimizer with no momentum.
     """
 
-    def __init__(self, network_parameters, lr=0.01):
+    def __init__(self, network_parameters, lr=0.01, momentum=0):
         self.network_parameters = network_parameters
         self.lr = lr
+        self.momentum = momentum
+        self.last_factor = [0 for _ in range(len(self.network_parameters))]
 
     def step(self):
         """
         Applies a step towards the line of maximum slope to all parameters of the network given their derivatives.
         Parameters are in the form (parameter, gradient_wrt_loss_of_parameter)
         """
-        for p in self.network_parameters:
-            p[0] -= self.lr * p[1]
+        for i, p in enumerate(self.network_parameters):
+            self.last_factor[i] = self.momentum * self.last_factor[i] + self.lr * p[1]
+            p[0] -= self.last_factor[i]
 
 
 class Model:
     def __init__(self) -> None:
         self.model = Sequential(Conv2d(3, 16, stride=2, padding=1),
                                 ReLU(),
-                                Conv2d(16, 32, stride=2, padding=1),
-                                ReLU(),
-                                Conv2d(32, 16, stride=2, padding=1),
-                                ReLU(),
-                                Conv2d(16, 3, stride=2, padding=1),
+                                Conv2d(16, 16, stride=2, padding=1),
                                 ReLU(),
                                 NearestUpsampling(),
+                                Conv2d(16, 16, padding=1),
                                 ReLU(),
                                 NearestUpsampling(),
-                                ReLU(),
-                                NearestUpsampling(),
-                                ReLU(),
-                                NearestUpsampling(),
+                                Conv2d(16, 3, padding=1),
                                 Sigmoid())
 
         self.criterion = MSE()
-        self.optimizer = SGD(self.model.param(), lr=0.0001)
+        self.optimizer = SGD(self.model.param(), lr=0.0000005)
         self.mini_batch_size = 500
+        #self.model.to_cuda()
 
     def load_pretrained_model(self) -> None:
         pass
