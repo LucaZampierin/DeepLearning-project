@@ -45,47 +45,72 @@ def validate(model, noise_img, ground_truth):
     psnr_tot = 0
     for i in range(noise_img.size(0)):
         denoised = model.forward(noise_img[i].view(1, 3, 32, 32)) #* 255
-        psnr_val = psnr(denoised, ground_truth[i].unsqueeze(0)).item()
+        psnr_val = psnr(denoised, ground_truth[i].unsqueeze(0))
         psnr_tot += psnr_val
     psnr_tot /= noise_img.size(0)
     return psnr_tot
 
+device="cuda"
 
-model_new = Sequential(Conv2d(3, 32, stride=2, padding=1),
-                       ReLU(),
-                       Conv2d(32, 3, stride=2, padding=1),
-                       ReLU(),
-                       NearestUpsampling(),
-                       ReLU(),
-                       NearestUpsampling(),
-                       Sigmoid())
+'''
+model_new = Sequential(Conv2d(3, 32, stride=2, padding=1, device=device),
+                       ReLU(device=device),
+                       Conv2d(32, 32, stride=2, padding=1, device=device),
+                       ReLU(device=device),
+                       #NNUpsampling(),
+                       #Conv2d(32, 16, padding=1),
+                       Upsampling(32, 16, padding=1, device=device),
+                       ReLU(device=device),
+                       #NNUpsampling(),
+                       #Conv2d(16, 3, padding=1),
+                       Upsampling(16, 3, padding=1, device=device),
+                       Sigmoid(device=device))
 
 loss = MSE()
 optimizer_new = SGD(model_new.param(), lr=0.00001)
+'''
+model_new = Model()
 
-model2 = torch.nn.Sequential(torch.nn.Conv2d(3, 32, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
-                             torch.nn.Conv2d(32, 3, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
-                             torch.nn.UpsamplingNearest2d(scale_factor=2), torch.nn.ReLU(),
-                             torch.nn.UpsamplingNearest2d(scale_factor=2), torch.nn.Sigmoid())
+model2 = torch.nn.Sequential(torch.nn.Conv2d(3, 16, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
+                             torch.nn.Conv2d(16, 16, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
+                             torch.nn.UpsamplingNearest2d(scale_factor=2), torch.nn.Conv2d(16, 16, kernel_size=(3, 3), padding=1), torch.nn.ReLU(),
+                             torch.nn.UpsamplingNearest2d(scale_factor=2), torch.nn.Conv2d(16, 3, kernel_size=(3, 3), padding=1),torch.nn.Sigmoid())
 
+model2.to(device)
 criterion = torch.nn.MSELoss()
 optimizer2 = torch.optim.SGD(model2.parameters(), lr=0.00001)
 
 noisy_imgs1, noisy_imgs2 = torch.load('../train_data.pkl')  # 50000 x 3 x 32 x 32
 val_noisy, val_clean = torch.load('../val_data.pkl')  # 50000 x 3 x 32 x 32
-noisy_imgs1 = noisy_imgs1[:500].float()
-noisy_imgs2 = noisy_imgs2[:500].float()
-val_noisy = val_noisy[:100].float()
-val_clean = val_clean[:100].float()
+noisy_imgs1 = noisy_imgs1[:500].float().to(device)
+noisy_imgs2 = noisy_imgs2[:500].float().to(device)
+val_noisy = val_noisy[:100].float().to(device)
+val_clean = val_clean[:100].float().to(device)
 
-model_new.modules[0].weights[:] = model2._modules['0'].weight.clone()
-model_new.modules[0].biases[:] = model2._modules['0'].bias.clone()
-model_new.modules[2].weights[:] = model2._modules['2'].weight.clone()
-model_new.modules[2].biases[:] = model2._modules['2'].bias.clone()
+model_new.model.modules[0].weights[:] = model2._modules['0'].weight.clone()
+model_new.model.modules[0].biases[:] = model2._modules['0'].bias.clone()
+model_new.model.modules[2].weights[:] = model2._modules['2'].weight.clone()
+model_new.model.modules[2].biases[:] = model2._modules['2'].bias.clone()
+model_new.model.modules[4].conv.weights[:] = model2._modules['5'].weight.clone()
+model_new.model.modules[4].conv.biases[:] = model2._modules['5'].bias.clone()
+model_new.model.modules[6].conv.weights[:] = model2._modules['8'].weight.clone()
+model_new.model.modules[6].conv.biases[:] = model2._modules['8'].bias.clone()
 
 train_model_torch(model2, noisy_imgs1, noisy_imgs2, criterion, optimizer2, epochs=1, mini_batch_size=250)
 with torch.no_grad():
-    train_model(model_new, noisy_imgs1, noisy_imgs2, loss, optimizer_new, epochs=1, mini_batch_size=250)
+    #train_model(model_new, noisy_imgs1, noisy_imgs2, loss, optimizer_new, epochs=1, mini_batch_size=250)
+    model_new.train(noisy_imgs1, noisy_imgs2, 1)
+
+print(torch.allclose(model_new.model.modules[0].biases, model2._modules['0'].bias))
+print(torch.allclose(model_new.model.modules[0].weights, model2._modules['0'].weight))
+print(torch.allclose(model_new.model.modules[2].biases, model2._modules['2'].bias))
+print(torch.allclose(model_new.model.modules[2].weights, model2._modules['2'].weight))
+
+print(torch.allclose(model_new.model.modules[4].conv.biases, model2._modules['5'].bias))
+print(torch.allclose(model_new.model.modules[4].conv.weights, model2._modules['5'].weight))
+print(torch.allclose(model_new.model.modules[6].conv.biases, model2._modules['8'].bias))
+print(torch.allclose(model_new.model.modules[6].conv.weights, model2._modules['8'].weight))
+pass
 
 
 '''

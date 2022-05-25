@@ -9,10 +9,10 @@ class Module(object):
     Base module class that is inherited from by every component of the framework.
     """
 
-    def __init__(self):
+    def __init__(self, device="cpu"):
         self.input = torch.empty(0)
         self.output = torch.empty(0)
-        self.device = "cpu"
+        self.device = device
 
     def forward(self, *input: torch.Tensor):
         raise NotImplementedError
@@ -26,10 +26,6 @@ class Module(object):
     def param(self):
         return []
 
-    def to_cuda(self):
-        if torch.cuda.is_available():
-            self.device = "cuda"
-
 
 class Activation(Module):
     """
@@ -38,8 +34,8 @@ class Activation(Module):
     All activation functions share the same gradient structure.
     """
 
-    def __init__(self, act, act_derivative):
-        super().__init__()
+    def __init__(self, act, act_derivative, device="cpu"):
+        super().__init__(device=device)
         self.activation = act
         self.derivative = act_derivative
 
@@ -57,7 +53,7 @@ class ReLU(Activation):
     It introduces a non-linearity by returning the max(0, x) element-wise.
     """
 
-    def __init__(self):
+    def __init__(self, device="cpu"):
         def relu(input: torch.Tensor):
             """
             Clamps all negative values to 0.
@@ -71,7 +67,7 @@ class ReLU(Activation):
             res = input.where(input <= 0, torch.empty(input.size()).fill_(1).to(self.device)).clamp(0, None)
             return res
 
-        super().__init__(relu, relu_prime)
+        super().__init__(relu, relu_prime, device=device)
 
 
 class Sigmoid(Activation):
@@ -80,7 +76,7 @@ class Sigmoid(Activation):
     It introduces a non-linearity by returning the sigmoid of the given tensor.
     """
 
-    def __init__(self):
+    def __init__(self, device="cpu"):
         def logistic_func(input: torch.Tensor):
             """
             Applies the sigmoid function to the input element-wise.
@@ -99,7 +95,7 @@ class Sigmoid(Activation):
             """
             return input.sigmoid() * (1 - input.sigmoid())
 
-        super().__init__(logistic_func, logistic_func_prime)
+        super().__init__(logistic_func, logistic_func_prime, device=device)
 
 
 class Sequential(Module):
@@ -117,9 +113,6 @@ class Sequential(Module):
         for module in self.modules:
             self.params.extend(module.param())
 
-    def to_cuda(self):
-        for module in self.modules:
-            module.to_cuda()
 
     def zero_grad(self):
         """
@@ -165,8 +158,8 @@ class MSE(Module):
     Mean-Square Error loss implementation.
     """
 
-    def __init__(self):
-        super().__init__()
+    def __init__(self, device="cpu"):
+        super().__init__(device=device)
 
     def forward(self, *input: torch.Tensor):
         """
@@ -186,13 +179,39 @@ class MSE(Module):
         return -(2 / (self.input.size(0) * self.input.size(1) * self.input.size(2) * self.input.size(3))) * self.input
 
 
-class NearestUpsampling(Module):
+class Upsampling(Module):
+    """
+    Wrapper around NNUpsampling and normal convolution.
+    Since no dilation support has been added to Conv2d, no dilation is supported for Upsampling either
+    """
+    def __init__(self, in_channels, out_channels, kernel_size=3, dilation=0, padding=0, scale_factor=2, device="cpu"):
+        super().__init__(device=device)
+        self.upsamp = NNUpsampling(scale_factor, device=device)
+        self.conv = Conv2d(in_channels, out_channels, kernel_size,padding=padding, device=device)
+
+    def zero_grad(self):
+        self.upsamp.zero_grad()
+        self.conv.zero_grad()
+
+    def param(self):
+        return self.conv.param()
+
+    def forward(self, input: torch.Tensor):
+        input = self.upsamp.forward(input)
+        return self.conv.forward(input)
+
+    def backward(self, grad_wrt_output: torch.Tensor):
+        res = self.conv.backward(grad_wrt_output)
+        return self.upsamp.backward(res)
+
+
+class NNUpsampling(Module):
     """
     Implementation of a Nearest Neighbor Upsampling.
     """
 
-    def __init__(self, scale_factor=2):
-        super().__init__()
+    def __init__(self, scale_factor=2, device="cpu"):
+        super().__init__(device=device)
         self.scale_factor = scale_factor
 
     def zero_grad(self):
@@ -241,13 +260,13 @@ class Conv2d(Module):
     NOTE: **Kernel is square**
     """
 
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=0, device="cpu"):
         assert stride > 0 and kernel_size > 0
         kernel_size = (kernel_size, kernel_size)
         if padding == "same":
             assert stride == 1
             padding = (kernel_size[0] - 1) // 2
-        super().__init__()
+        super().__init__(device=device)
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.kernel_size = kernel_size
@@ -263,13 +282,6 @@ class Conv2d(Module):
 
         self.params = [[self.weights, self.weights_derivatives], [self.biases, self.biases_derivatives]]
 
-    def to_cuda(self):
-        if torch.cuda.is_available():
-            self.device = "cuda"
-            self.weights = self.weights.to("cuda")
-            self.weights_derivatives = self.weights_derivatives.to("cuda")
-            self.biases = self.biases.to("cuda")
-            self.biases_derivatives = self.biases_derivatives.to("cuda")
 
     def cross_correlation(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
         kernel_size = (kernel.size(-2), kernel.size(-1))
@@ -365,26 +377,30 @@ class SGD:
 
 class Model:
     def __init__(self) -> None:
-        self.model = Sequential(Conv2d(3, 16, stride=2, padding=1),
-                                ReLU(),
-                                Conv2d(16, 16, stride=2, padding=1),
-                                ReLU(),
-                                NearestUpsampling(),
-                                Conv2d(16, 16, padding=1),
-                                ReLU(),
-                                NearestUpsampling(),
-                                Conv2d(16, 3, padding=1),
-                                Sigmoid())
+        if torch.cuda.is_available():
+            self.device = "cuda"
+        else:
+            self.device = "cpu"
+
+        self.model = Sequential(Conv2d(3, 16, stride=2, padding=1, device=self.device),
+                                ReLU(device=self.device),
+                                Conv2d(16, 16, stride=2, padding=1,device=self.device),
+                                ReLU(device=self.device),
+                                Upsampling(16, 16, padding=1,device=self.device),
+                                ReLU(device=self.device),
+                                Upsampling(16, 3, padding=1,device=self.device),
+                                Sigmoid(device=self.device))
 
         self.criterion = MSE()
-        self.optimizer = SGD(self.model.param(), lr=0.0000005)
-        self.mini_batch_size = 500
-        #self.model.to_cuda()
+        self.optimizer = SGD(self.model.param(), lr=0.00001)
+        self.mini_batch_size = 250
 
     def load_pretrained_model(self) -> None:
         pass
 
     def train(self, train_input: torch.Tensor, train_target: torch.Tensor, num_epochs: int):
+        train_input = train_input.to(self.device)
+        train_target = train_target.to(self.device)
         for e in range(num_epochs):
             print(f"Epoch: {e}")
             avg_loss = 0
@@ -399,5 +415,6 @@ class Model:
             print(avg_loss/(train_input.size(0) // self.mini_batch_size))
 
     def predict(self, test_input: torch.Tensor) -> torch.Tensor:
+        test_input = test_input.to(self.device)
         # Check it is in the correct range
         return self.model.forward(test_input)
