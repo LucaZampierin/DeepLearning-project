@@ -1,5 +1,5 @@
 import torch
-from others.utils import *
+from .others.utils import *
 
 
 # torch.set_grad_enabled(False)
@@ -21,6 +21,9 @@ class Module(object):
         raise NotImplementedError
 
     def zero_grad(self):
+        pass
+
+    def set_params(self, val):
         pass
 
     def param(self):
@@ -196,6 +199,9 @@ class Upsampling(Module):
     def param(self):
         return self.conv.param()
 
+    def set_params(self, val):
+        self.conv.set_params(val)
+
     def forward(self, input: torch.Tensor):
         input = self.upsamp.forward(input)
         return self.conv.forward(input)
@@ -273,15 +279,24 @@ class Conv2d(Module):
         self.stride = stride
         self.padding = padding
 
-        # Glorot Initialization
-        std_weights = 6.0 / (in_channels + out_channels)
-        self.weights = torch.empty((out_channels, in_channels, *kernel_size)).uniform_(-std_weights, std_weights).to(self.device)
-        self.weights_derivatives = torch.empty(self.weights.size()).fill_(0).to(self.device)
-        self.biases = torch.empty(out_channels).uniform_(-std_weights, std_weights).to(self.device)
-        self.biases_derivatives = torch.empty(self.biases.size()).fill_(0).to(self.device)
+        # init.kaiming_uniform_
+        fan_in = in_channels * kernel_size[0] * kernel_size[1]
+        gain = (2.0 / (1 + (5 ** 0.5) ** 2)) ** 0.5
+        std_weights = (3.0 ** 0.5) * (gain / (fan_in ** 0.5))
+        std_bias = 1 / ((fan_in)**0.5)
+        self.weight = torch.empty((out_channels, in_channels, *kernel_size)).uniform_(-std_weights, std_weights).to(self.device)
+        self.weight_derivatives = torch.empty(self.weight.size()).fill_(0).to(self.device)
+        self.bias = torch.empty(out_channels).uniform_(-std_bias, std_bias).to(self.device)
+        self.bias_derivatives = torch.empty(self.bias.size()).fill_(0).to(self.device)
 
-        self.params = [[self.weights, self.weights_derivatives], [self.biases, self.biases_derivatives]]
+        self.params = [[self.weight, self.weight_derivatives], [self.bias, self.bias_derivatives]]
 
+    def set_params(self, val):
+        assert len(val) == 2
+        assert val[0][0].shape == self.weight.shape and val[1][0].shape == self.bias.shape
+        self.weight = val[0][0].clone().to(self.device)
+        self.bias = val[1][0].clone().to(self.device)
+        self.params = [[self.weight, self.weight_derivatives], [self.bias, self.bias_derivatives]]
 
     def cross_correlation(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
         kernel_size = (kernel.size(-2), kernel.size(-1))
@@ -303,16 +318,16 @@ class Conv2d(Module):
         assert input.size(1) == self.in_channels
         self.input = input
 
-        res = self.cross_correlation(input.unsqueeze(1), self.weights.unsqueeze(0), stride=self.stride, padding=self.padding)
-        self.output = res.sum(2) + self.biases.view(1, -1, 1, 1)
+        res = self.cross_correlation(input.unsqueeze(1), self.weight.unsqueeze(0), stride=self.stride, padding=self.padding)
+        self.output = res.sum(2) + self.bias.view(1, -1, 1, 1)
         return self.output
 
     def zero_grad(self):
         """
         Zeroes the gradients of the weights and biases.
         """
-        self.weights_derivatives.fill_(0)
-        self.biases_derivatives.fill_(0)
+        self.weight_derivatives.fill_(0)
+        self.bias_derivatives.fill_(0)
 
     def cross_correlation_backward(self, input: torch.Tensor, kernel: torch.Tensor, stride=1, padding=0, dilation=1):
         kernel_size = (kernel.size(-2), kernel.size(-1))
@@ -332,12 +347,12 @@ class Conv2d(Module):
         :param grad_wrt_output: gradient of loss wrt to output tensor of the forward pass
         :return: gradient of loss wrt to input to the layer
         """
-        self.biases_derivatives += grad_wrt_output.sum((0, 2, 3))
+        self.bias_derivatives += grad_wrt_output.sum((0, 2, 3))
         dilated_grad = dilate_efficient(grad_wrt_output, factor=self.stride, device=self.device)
         res = self.cross_correlation(self.input.unsqueeze(1), dilated_grad.unsqueeze(2), padding=self.padding).sum(dim=0)#.squeeze()
-        self.weights_derivatives += res
-        res = self.cross_correlation_backward(dilated_grad, rot180(self.weights).unsqueeze(0),
-                                            padding=(self.weights.size(2) - 1) // 2)
+        self.weight_derivatives += res
+        res = self.cross_correlation_backward(dilated_grad, rot180(self.weight).unsqueeze(0),
+                                            padding=(self.weight.size(2) - 1) // 2)
         return res.sum(dim=1).squeeze()
 
     def param(self):
@@ -347,11 +362,6 @@ class Conv2d(Module):
         """
         return self.params
 
-    def weight(self):
-        return self.weights
-
-    def bias(self):
-        return self.biases
 
 
 class SGD:
@@ -382,39 +392,46 @@ class Model:
         else:
             self.device = "cpu"
 
-        self.model = Sequential(Conv2d(3, 16, stride=2, padding=1, device=self.device),
+        self.model = Sequential(Conv2d(3, 16, padding=1, device=self.device),
                                 ReLU(device=self.device),
-                                Conv2d(16, 16, stride=2, padding=1,device=self.device),
+                                Conv2d(16, 32, stride=2, padding=1,device=self.device),
                                 ReLU(device=self.device),
-                                Upsampling(16, 16, padding=1,device=self.device),
+                                Upsampling(32, 16, padding=1,device=self.device),
                                 ReLU(device=self.device),
-                                Upsampling(16, 3, padding=1,device=self.device),
+                                Conv2d(16, 3, padding=1,device=self.device),
                                 Sigmoid(device=self.device))
 
         self.criterion = MSE()
-        self.optimizer = SGD(self.model.param(), lr=0.00001)
-        self.mini_batch_size = 250
+        self.optimizer = SGD(self.model.param(), lr=0.00001, momentum=0.9)
+        self.mini_batch_size = 50
 
     def load_pretrained_model(self) -> None:
-        pass
+        from pathlib import Path
+        model_path = Path(__file__).parent / "bestmodel.pth"
+        model = torch.load(model_path)
+        for param in model:
+            i, val = param
+            if len(val) == 0:continue
+            self.model.modules[i].set_params(val)
+        self.optimizer = SGD(self.model.param(), lr = 0.00001, momentum=0.9)
+        
 
     def train(self, train_input: torch.Tensor, train_target: torch.Tensor, num_epochs: int):
-        train_input = train_input.to(self.device)
-        train_target = train_target.to(self.device)
+        train_input = train_input.to(self.device).float()
+        train_target = train_target.to(self.device).float()
         for e in range(num_epochs):
             print(f"Epoch: {e}")
             avg_loss = 0
             for b in range(0, train_input.size(0), self.mini_batch_size):
-                output = self.model.forward(train_input.narrow(0, b, self.mini_batch_size))
+                output = self.model.forward(train_input.narrow(0, b, self.mini_batch_size)) * 255
                 loss = self.criterion.forward(output, train_target.narrow(0, b, self.mini_batch_size))
                 avg_loss += loss.item()
                 self.model.zero_grad()
                 self.model.backward(self.criterion.backward())
                 self.optimizer.step()
-                print(b)
             print(avg_loss/(train_input.size(0) // self.mini_batch_size))
 
     def predict(self, test_input: torch.Tensor) -> torch.Tensor:
-        test_input = test_input.to(self.device)
+        test_input = test_input.to(self.device).float()
         # Check it is in the correct range
-        return self.model.forward(test_input)
+        return self.model.forward(test_input) * 255

@@ -69,6 +69,7 @@ model_new = Sequential(Conv2d(3, 32, stride=2, padding=1, device=device),
 loss = MSE()
 optimizer_new = SGD(model_new.param(), lr=0.00001)
 '''
+'''
 model_new = Model()
 
 model2 = torch.nn.Sequential(torch.nn.Conv2d(3, 16, kernel_size=(3, 3), stride=(2, 2), padding=1), torch.nn.ReLU(),
@@ -113,7 +114,6 @@ print(torch.allclose(model_new.model.modules[6].conv.weights, model2._modules['8
 pass
 
 
-'''
 from model import Model
 
 noisy_imgs1, noisy_imgs2 = torch.load('../train_data.pkl')  # 50000 x 3 x 32 x 32
@@ -140,3 +140,10 @@ with torch.no_grad():
 #print(val_clean[0])
 #print(model2(val_noisy[0].float()) * 255)
 '''
+
+import json
+
+model = Model()
+model.load_pretrained_model()
+culo = torch.load("D:\EPFL\dl\DeepLearning-project\Miniproject_2\\bestmodel.pth")
+pass
