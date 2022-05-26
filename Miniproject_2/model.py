@@ -113,10 +113,6 @@ class Sequential(Module):
         self.modules = modules
         self.params = []
 
-        for module in self.modules:
-            self.params.extend(module.param())
-
-
     def zero_grad(self):
         """
         Invokes the zero_grad method of all methods to clear out the grad field.
@@ -153,6 +149,9 @@ class Sequential(Module):
         """
         :return: returns the parameter list of the whole network.
         """
+        self.params = []
+        for module in self.modules:
+            self.params.extend(module.param())
         return self.params
 
 
