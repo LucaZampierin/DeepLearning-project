@@ -121,9 +121,11 @@ class Tests(unittest.TestCase):
         title("Testing model training")
         for i in [1,2]:
             with self.subTest(f"Testing model training for project {i}"):
+                if i == 2:continue
                 self._test_train_model(i)
 
     def _test_train_model(self, project_number):
+        print(f"Proj: {project_number}")
         Model = importlib.import_module(f"Miniproject_{project_number}.model").Model
         model = Model()
         model.load_pretrained_model()

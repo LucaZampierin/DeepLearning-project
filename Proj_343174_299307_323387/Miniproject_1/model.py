@@ -52,7 +52,7 @@ class DnCNN(torch.nn.Module):
 class Model():
     def __init__(self):
         super().__init__()
-        self.device = torch.device('cpu' if torch.cuda.is_available() else 'cpu')
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         self.model = DnCNN().to(device=self.device)
         self.optimizer = torch.optim.Adam(params= self.model.parameters(), lr=0.0031, betas=(0.875, 0.991), weight_decay=0.0000016800238576037557)
         self.criterion = nn.MSELoss().to(device=self.device)
@@ -77,14 +77,17 @@ class Model():
     def load_pretrained_model( self ):
         from pathlib import Path
         model_path = Path(__file__).parent / "bestmodel.pth"
-        self.model.load_state_dict(torch.load(model_path))
+        self.model.load_state_dict(torch.load(model_path, map_location=self.device))
 
     def train(self , train_input , train_target , num_epochs=10):
+        torch.set_grad_enabled(True)
         mini_batch_size = 50
         self.model.train()
         train_input, train_target = train_input.float().to(self.device), train_target.float().to(self.device)
         for e in range(num_epochs):
+            print(f"Epoch: {e}")
             for b in range(0, train_input.size(0), mini_batch_size):
+                if b % (10*mini_batch_size) == 0: print(f"Minibatch: {b}")
                 output = self.model(train_input.narrow(0, b, mini_batch_size).float().to(self.device))
                 loss = self.criterion(output, train_target.narrow(0, b, mini_batch_size).float().to(self.device))
                 self.optimizer.zero_grad()

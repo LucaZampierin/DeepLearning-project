@@ -1,7 +1,6 @@
 import torch
 
 
-torch.set_grad_enabled(False)
 
 def rot180(input: torch.Tensor):
     """
@@ -414,7 +413,7 @@ class SGD:
 class Model:
     def __init__(self) -> None:
         if torch.cuda.is_available():
-            self.device = "cpu"
+            self.device = "cuda"
         else:
             self.device = "cpu"
 
@@ -429,12 +428,12 @@ class Model:
 
         self.criterion = MSE()
         self.optimizer = SGD(self.model.param(), lr=0.00001, momentum=0.9)
-        self.mini_batch_size = 50
+        self.mini_batch_size = 100
 
     def load_pretrained_model(self) -> None:
         from pathlib import Path
         model_path = Path(__file__).parent / "bestmodel.pth"
-        model = torch.load(model_path)
+        model = torch.load(model_path, map_location=self.device)
         for param in model:
             i, val = param
             if len(val) == 0:continue
@@ -443,12 +442,14 @@ class Model:
         
 
     def train(self, train_input: torch.Tensor, train_target: torch.Tensor, num_epochs: int):
+        torch.set_grad_enabled(False)
         train_input = train_input.to(self.device).float()
         train_target = train_target.to(self.device).float()
         for e in range(num_epochs):
             print(f"Epoch: {e}")
             avg_loss = 0
             for b in range(0, train_input.size(0), self.mini_batch_size):
+                if b % (10*self.mini_batch_size) == 0: print(f"Minibatch: {b}")
                 output = self.model.forward(train_input.narrow(0, b, self.mini_batch_size)) * 255
                 loss = self.criterion.forward(output, train_target.narrow(0, b, self.mini_batch_size))
                 avg_loss += loss.item()
