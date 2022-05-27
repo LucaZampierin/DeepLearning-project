@@ -456,7 +456,7 @@ class Model:
                 self.model.zero_grad()
                 self.model.backward(self.criterion.backward())
                 self.optimizer.step()
-            print(avg_loss/(train_input.size(0) // self.mini_batch_size))
+            #print(avg_loss/(train_input.size(0) // self.mini_batch_size))
 
     def predict(self, test_input: torch.Tensor) -> torch.Tensor:
         test_input = test_input.to(self.device).float()

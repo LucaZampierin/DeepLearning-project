@@ -82,8 +82,8 @@ class Tests(unittest.TestCase):
     def _test_forward_dummy_input(self, project_number):
         Model = importlib.import_module(f"Miniproject_{project_number}.model").Model
         model = Model()
-        out = model.predict(torch.rand(1, 3, 512, 512) * 255)
-        self.assertEqual(out.shape, (1, 3, 512, 512))
+        out = model.predict(torch.rand(1, 3, 32, 32) * 255)
+        self.assertEqual(out.shape, (1, 3, 32, 32))
         self.assertGreaterEqual(out.min(), 0)
         self.assertLessEqual(out.max(), 255)
 
@@ -121,7 +121,6 @@ class Tests(unittest.TestCase):
         title("Testing model training")
         for i in [1,2]:
             with self.subTest(f"Testing model training for project {i}"):
-                if i == 2:continue
                 self._test_train_model(i)
 
     def _test_train_model(self, project_number):
